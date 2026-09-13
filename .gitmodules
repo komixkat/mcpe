@@ -19,6 +19,3 @@
 [submodule "mcpelauncher-apkinfo"]
 	path = mcpelauncher-apkinfo
 	url = https://github.com/minecraft-linux/mcpelauncher-apkinfo.git
-[submodule "mcpelauncher-linker/core"]
-	path = mcpelauncher-linker/core
-	url = https://github.com/komixkat/android_core.git
