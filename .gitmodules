@@ -1,0 +1,24 @@
+[submodule "sdl3"]
+	path = sdl3
+	url = https://github.com/libsdl-org/SDL.git
+[submodule "imgui"]
+	path = imgui
+	url = https://github.com/ocornut/imgui.git
+[submodule "libjnivm"]
+	path = libjnivm
+	url = https://github.com/ChristopherHX/libjnivm.git
+[submodule "linux-gamepad"]
+	path = linux-gamepad
+	url = https://github.com/MCMrARM/linux-gamepad.git
+[submodule "simple-ipc"]
+	path = simple-ipc
+	url = https://github.com/MCMrARM/simple-ipc.git
+[submodule "axml-parser"]
+	path = axml-parser
+	url = https://github.com/MCMrARM/axml-parser.git
+[submodule "mcpelauncher-apkinfo"]
+	path = mcpelauncher-apkinfo
+	url = https://github.com/minecraft-linux/mcpelauncher-apkinfo.git
+[submodule "mcpelauncher-linker/core"]
+	path = mcpelauncher-linker/core
+	url = https://github.com/komixkat/android_core.git

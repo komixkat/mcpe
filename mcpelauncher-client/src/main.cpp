@@ -1,0 +1,863 @@
+#include <log.h>
+#include <dlfcn.h>
+#include <game_window_manager.h>
+#include <argparser.h>
+#include <mcpelauncher/minecraft_utils.h>
+#include <mcpelauncher/minecraft_version.h>
+#include <mcpelauncher/crash_handler.h>
+#include <mcpelauncher/path_helper.h>
+#include <mcpelauncher/mod_loader.h>
+#include "window_callbacks.h"
+#include "fake_swappygl.h"
+#include "splitscreen_patch.h"
+#include "gl_core_patch.h"
+#include "xbox_live_helper.h"
+#include "shader_error_patch.h"
+#include "hbui_patch.h"
+#include "strafe_sprint_patch.h"
+#include "jni/jni_support.h"
+#include "jni/store.h"
+#if defined(__i386__) || defined(__x86_64__)
+#include "cpuid.h"
+#include "texel_aa_patch.h"
+#include "xbox_shutdown_patch.h"
+#endif
+#include <build_info.h>
+#include <mcpelauncher/patch_utils.h>
+#include <libc_shim.h>
+#include <mcpelauncher/linker.h>
+#include <minecraft/imported/android_symbols.h>
+#include "main.h"
+
+#include <cstring>
+#include <sys/mman.h>
+#include <unistd.h>
+#ifdef HAVE_SDL3AUDIO
+#include "fake_audio.h"
+#endif
+#include "fake_looper.h"
+#include "fake_window.h"
+#include "fake_assetmanager.h"
+#include "fake_egl.h"
+#include "symbols.h"
+#include "core_patches.h"
+#include "pairip_plt_workaround.h"
+#include "thread_mover.h"
+#include <FileUtil.h>
+#include <properties/property.h>
+#include <fstream>
+#include "glad/glad.h"
+// For getpid
+#include <unistd.h>
+#include <simpleipc/client/service_client.h>
+#include <daemon_utils/auto_shutdown_service.h>
+#include "settings.h"
+#include "imgui_ui.h"
+#include <sstream>
+#include <mcpelauncher/apkinfo.h>
+
+#ifdef __x86_64__
+// Strong override of the linker's weak pre-constructor hook. The linker
+// invokes this for every library right after it has been fully relocated but
+// before its DT_INIT / DT_INIT_ARRAY run. libPlayFabMultiplayer.so is the
+// natural place for the PairIP workaround: PairIP leaves its .got.plt slots
+// unrelocated (raw lazy-stub addresses pointing below the load bias), so any
+// call made from its constructors jumps to an unmapped address and crashes.
+// Applying the fixup here, rather than after loadMinecraftLib() returns,
+// closes that window. Idempotence is handled inside the workaround.
+extern "C" void mcpelauncher_linker_on_load_so(const char* filename, size_t base) {
+    if (filename && strstr(filename, "libPlayFabMultiplayer.so") != nullptr) {
+        Log::info("Launcher", "PairIP: pre-constructor fixup for %s @ 0x%lx",
+                  filename, (unsigned long)base);
+        mcpelauncher::apply_pairip_plt_workaround_for(base, "libPlayFabMultiplayer.so");
+    }
+}
+#endif
+
+struct RpcCallbackServer : daemon_utils::auto_shutdown_service {
+    RpcCallbackServer(const std::string& path, JniSupport& support) : daemon_utils::auto_shutdown_service(path, daemon_utils::shutdown_policy::never) {
+        add_handler_async("mcpelauncher-client/sendfile", [this, &support](simpleipc::connection& conn, std::string const& method, nlohmann::json const& data, result_handler const& cb) {
+            std::vector<std::string> files = data;
+            for(auto&& file : files) {
+                if(file.rfind("minecraft://", 0) == 0) {
+                    support.sendUri(file);
+                } else if(file.find("file://") == 0) {  // flatpak sends files as a uri
+                    auto path = file.substr(7);
+                    support.importFile(path);
+                } else {
+                    support.importFile(file);
+                }
+            }
+            cb(simpleipc::rpc_json_result::response({}));
+        });
+    }
+};
+
+static size_t base;
+LauncherOptions options;
+
+void printVersionInfo();
+
+template <const char** names, class>
+class SmartStub;
+template <const char** names, size_t... I>
+class SmartStub<names, std::integer_sequence<size_t, I...>> {
+public:
+    template <size_t i>
+    static int Add(std::unordered_map<std::string, void*>& android_syms) {
+        android_syms.insert({names[i], (void*)+[]() { Log::warn("Main", "Android stub %s called", names[i]); }});
+        return 0;
+    }
+    static void AddAll(std::unordered_map<std::string, void*>& android_syms) {
+        int a[] = {Add<I>(android_syms)...};
+    }
+};
+
+std::string normalizePath(const std::string& path) {
+    if (!path.empty() && path[path.length() - 1] != '/')
+        return path + '/';
+    return path;
+}
+
+#ifdef __APPLE__
+extern "C" __attribute__((weak)) const char * elg_lib = "";
+#endif
+
+static std::string getOptionsPath() {
+    return PathHelper::getPrimaryDataDirectory() + "games/com.mojang/minecraftpe/options.txt";
+}
+
+static void parseOptions(properties::property_list& properties) {
+    std::ifstream propertiesFile(getOptionsPath());
+    if(propertiesFile) {
+        properties.load(propertiesFile);
+    }
+}
+
+static void saveOptions(properties::property_list& properties) {
+    std::ofstream propertiesFile(getOptionsPath());
+    if(propertiesFile.is_open()) {
+        properties.save(propertiesFile);
+    }
+}
+
+void readOptions();
+
+int main(int argc, char* argv[]) {
+    if(argc == 2 && argv[1][0] != '-') {
+        Log::info("Sendfile", "sending file");
+        simpleipc::client::service_client sc(PathHelper::getPrimaryDataDirectory() + "file_handler");
+        std::vector<std::string> files = {argv[1]};
+        static std::mutex mlock;
+        mlock.lock();
+        auto call = simpleipc::client::rpc_call<int>(sc.rpc("mcpelauncher-client/sendfile", files), [](const nlohmann::json& res) {
+            Log::info("Sendfile", "success");
+            mlock.unlock();
+            return 0;
+        });
+        call.call();
+        mlock.lock();
+        return 0;
+    }
+
+    CrashHandler::registerCrashHandler();
+    MinecraftUtils::workaroundLocaleBug();
+
+    argparser::arg_parser p;
+    argparser::arg<bool> printVersion(p, "--version", "-v", "Prints version info");
+    argparser::arg<std::string> gameDir(p, "--game-dir", "-dg", "Directory with the game and assets");
+    argparser::arg<std::string> dataDir(p, "--data-dir", "-dd", "Directory to use for the data");
+    argparser::arg<std::string> cacheDir(p, "--cache-dir", "-dc", "Directory to use for cache");
+    argparser::arg<std::string> importFilePath(p, "--import-file-path", "-ifp", "File to import to the game");
+    argparser::arg<std::string> sendUri(p, "--uri", "-u", "URI to send to the game");
+    argparser::arg<std::string> v8Flags(p, "--v8-flags", "-v8f", "Flags to pass to the v8 engine of the game",
+#if defined(__APPLE__) && defined(__aarch64__)
+                                        // Due to problems with running JIT compiled code without using apple specfic workarounds, we just run javascript via jitless
+                                        "--jitless"
+#else
+                                        ""
+#endif
+    );
+    argparser::arg<bool> webrtcdebug(p, "--webrtc-debug", "-drtc", "Enable webrtc debug logging");
+    argparser::arg<int> windowWidth(p, "--width", "-ww", "Window width", 720);
+    argparser::arg<int> windowHeight(p, "--height", "-wh", "Window height", 480);
+    argparser::arg<bool> disableFmod(p, "--disable-fmod", "-df", "Disables usage of the FMod audio library");
+    argparser::arg<bool> forceEgl(p, "--force-opengles", "-fes", "Force creating an OpenGL ES surface instead of using the glcorepatch hack", !GLCorePatch::mustUseDesktopGL());
+    argparser::arg<bool> texturePatch(p, "--texture-patch", "-tp", "Rewrite textures of the game for Minecraft 1.16.210 - 1.17.4X", false);
+    argparser::arg<bool> stdinImpt(p, "--stdin-import", "-si", "Use stdin for file import", false);
+    argparser::arg<bool> resetSettings(p, "--reset-settings", "-gs", "Save the default Settings", false);
+    argparser::arg<bool> freeOnly(p, "--free-only", "-f", "Only allow starting free versions", false);
+    argparser::arg<bool> emulateTouch(p, "--emulate-touch", "-et", "Emulate touch with mouse", false);
+    argparser::arg<std::vector<std::string>> mods(p, "--mods", "-m", "Additional directories to load mods from split by ','");
+
+    if(!p.parse(argc, (const char**)argv))
+        return 1;
+    if(printVersion) {
+        printVersionInfo();
+        return 0;
+    }
+    options.importFilePath = importFilePath;
+    options.sendUri = sendUri;
+    options.windowWidth = windowWidth;
+    options.windowHeight = windowHeight;
+    options.graphicsApi = forceEgl.get() ? GraphicsApi::OPENGL_ES2 : GraphicsApi::OPENGL;
+    options.useStdinImport = stdinImpt;
+    options.emulateTouch = emulateTouch;
+    std::vector<std::string> modDirs;
+    for(auto&& m : mods.get()) {
+        for(size_t i = 0; i < m.length();) {
+            auto r = m.find(',', i);
+            if(r == std::string::npos) {
+                modDirs.push_back(normalizePath(m.substr(i)));
+                break;
+            } else {
+                modDirs.push_back(normalizePath(m.substr(i, r - i)));
+                i = r + 1;
+            }
+        }
+    }
+
+    FakeEGL::enableTexturePatch = texturePatch.get();
+
+    auto defaultDataDir = PathHelper::getPrimaryDataDirectory();
+    if(!gameDir.get().empty())
+        PathHelper::setGameDir(gameDir);
+    if(!dataDir.get().empty())
+        PathHelper::setDataDir(dataDir);
+    if(!cacheDir.get().empty())
+        PathHelper::setCacheDir(cacheDir);
+
+    Log::info("Launcher", "Version: client %s / manifest %s", CLIENT_GIT_COMMIT_HASH, MANIFEST_GIT_COMMIT_HASH);
+#if defined(__linux__)
+#define TARGET "Linux"
+#elif defined(__APPLE__)
+#define TARGET "macOS"
+#elif defined(__FreeBSD__)
+#define TARGET "FreeBSD"
+#else
+#define TARGET "Unknown"
+#endif
+#if defined(__x86_64__)
+#define ARCH "x86_64"
+#elif defined(__i386__)
+#define ARCH "x86"
+#elif defined(__aarch64__)
+#define ARCH "arm64"
+#elif defined(__arm__)
+#define ARCH "arm"
+#else
+#define ARCH "Unknown"
+#endif
+    Log::info("Launcher", "OS: %s", TARGET);
+    Log::info("Launcher", "Arch: %s", ARCH);
+
+    std::ifstream manifestFileStream(PathHelper::getGameDir() + "AndroidManifest.xml", std::ios::binary);
+    if(manifestFileStream.is_open()) {
+        std::stringstream manifest;
+        manifest << manifestFileStream.rdbuf();
+        auto smanifest = manifest.str();
+
+        axml::AXMLFile manifestFile (smanifest.data(), smanifest.size());
+        axml::AXMLParser manifestParser (manifestFile);
+        ApkInfo apkInfo = ApkInfo::fromXml(manifestParser);
+
+        Log::info("Launcher", "Minecraft Package: %s", apkInfo.package.c_str());
+        Log::info("Launcher", "Minecraft Version Code: %d", apkInfo.versionCode);
+
+        MinecraftVersion::init(apkInfo.package, apkInfo.versionCode);
+    }
+    Log::info("Launcher", "Game version: %s", MinecraftVersion::getString().c_str());
+
+    readOptions();
+
+#ifdef __APPLE__
+    if(MinecraftVersion::isAtLeast(1, 26, 10, 0)) {
+        std::string appdir = PathHelper::getAppDir();
+        std::string libEGL = appdir + "/../Frameworks/mvk-angle/libEGL.dylib";
+        std::string MoltenVK_icd = appdir + "/../Frameworks/mvk-angle/MoltenVK_icd.json";
+        if(FileUtil::exists(libEGL) && FileUtil::exists(MoltenVK_icd)) {
+            // Memory leak, but should be ok as onetime allocation
+            elg_lib = strdup(libEGL.data());
+            setenv("ANGLE_DEFAULT_PLATFORM", "vulkan", true);
+            setenv("VK_ICD_FILENAMES", MoltenVK_icd.data(), true);
+            // Vibrant Visuals not fully supported
+            properties::property_list properties(':');
+            properties::property<int> graphicsMode(properties, "graphics_mode", 2);
+            parseOptions(properties);
+            auto oldOption = graphicsMode.get();
+            if(oldOption != 0 && oldOption != 1) {
+                Log::warn("Launcher", "Vibrant Visuals via MoltenVK are not supported yet and causing rendering issues, disabling this graphics mode!");
+                graphicsMode.set(1);
+                saveOptions(properties);
+            }
+        } else {
+            Log::error("Launcher", "Failed to find one of '%s' and '%s'", libEGL.data(), MoltenVK_icd.data());
+            Log::error("Launcher", "Expect seeing a black screen, you have been warned");
+        }
+    }
+#endif
+
+#if defined(__i386__) || defined(__x86_64__)
+    {
+        CpuId cpuid;
+        Log::info("Launcher", "CPU: %s %s", cpuid.getManufacturer(), cpuid.getBrandString());
+        Log::info("Launcher", "CPU supports SSSE3: %s",
+                  cpuid.queryFeatureFlag(CpuId::FeatureFlag::SSSE3) ? "YES" : "NO");
+    }
+#endif
+
+    if(resetSettings.get()) {
+        Log::info("Launcher", "Resetting Launcher Settings File: %s", Settings::getPath().data());
+        Settings::save();
+        Log::info("Launcher", "Launcher Settings reset");
+    } else {
+        Log::info("Launcher", "Reading Launcher Settings File: %s", Settings::getPath().data());
+        Settings::load();
+        Log::info("Launcher", "Applied Launcher Settings");
+    }
+
+    Log::trace("Launcher", "Loading android libraries");
+    linker::init();
+    Log::trace("Launcher", "linker loaded");
+    auto windowManager = GameWindowManager::getManager();
+
+#if !defined(__linux__)
+    // Fake /proc/cpuinfo
+    // https://github.com/pytorch/cpuinfo depends on this file for linux builds
+    auto fakeproc = PathHelper::getPrimaryDataDirectory() + "proc/";
+    FileUtil::mkdirRecursive(fakeproc);
+    std::ofstream fake_cpuinfo(fakeproc + "/cpuinfo", std::ios::binary | std::ios::trunc);
+    if(fake_cpuinfo.is_open()) {
+#if defined(__i386__) || defined(__x86_64__)
+        fake_cpuinfo << R"(processor	: 0
+vendor_id	: GenuineIntel
+cpu family	: 6
+model		: 142
+model name	: Intel(R) Core(TM) i7-8550U CPU @ 1.80GHz
+stepping	: 10
+microcode	: 0xffffffff
+cpu MHz		: 1991.999
+cache size	: 8192 KB
+physical id	: 0
+siblings	: 8
+core id		: 0
+cpu cores	: 4
+apicid		: 0
+initial apicid	: 0
+fpu		: yes
+fpu_exception	: yes
+cpuid level	: 22
+wp		: yes
+flags		: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ss ht syscall nx pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology cpuid pni pclmulqdq vmx ssse3 fma cx16 pcid sse4_1 sse4_2 movbe popcnt aes xsave avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch invpcid_single pti ssbd ibrs ibpb stibp tpr_shadow vnmi ept vpid ept_ad fsgsbase bmi1 avx2 smep bmi2 erms invpcid rdseed adx smap clflushopt xsaveopt xsavec xgetbv1 xsaves flush_l1d arch_capabilities
+vmx flags	: vnmi invvpid ept_x_only ept_ad ept_1gb tsc_offset vtpr ept vpid unrestricted_guest ept_mode_based_exec
+bugs		: cpu_meltdown spectre_v1 spectre_v2 spec_store_bypass l1tf mds swapgs itlb_multihit srbds
+bogomips	: 3983.99
+clflush size	: 64
+cache_alignment	: 64
+address sizes	: 39 bits physical, 48 bits virtual
+power management:
+
+
+)";
+#elif defined(__arm__) || defined(__aarch64__)
+        fake_cpuinfo << R"(Processor	: AArch64 Processor rev 4 (aarch64)
+processor	: 0
+BogoMIPS	: 38.40
+Features	: fp asimd evtstrm aes pmull sha1 sha2 crc32
+CPU implementer	: 0x51
+CPU architecture: 8
+CPU variant	: 0xa
+CPU part	: 0x801
+CPU revision	: 4
+
+Hardware	: Qualcomm Technologies, Inc MSM8998
+
+)";
+#endif
+        fake_cpuinfo.close();
+    }
+    // cpuinfo for arm64 fails if these are missing...
+    auto fakesys = PathHelper::getPrimaryDataDirectory() + "sys/";
+    auto fake_cpu = fakesys + "devices/system/cpu/";
+    FileUtil::mkdirRecursive(fake_cpu);
+    std::ofstream fake_cpu_present(fake_cpu + "/present", std::ios::binary | std::ios::trunc);
+    if(fake_cpu_present.is_open()) {
+        fake_cpu_present << R"(0-3)";
+        fake_cpu_present.close();
+    }
+    std::ofstream fake_cpu_possible(fake_cpu + "/possible", std::ios::binary | std::ios::trunc);
+    if(fake_cpu_possible.is_open()) {
+        fake_cpu_possible << R"(0-3)";
+        fake_cpu_possible.close();
+    }
+#endif
+
+    // Fix saving to internal storage without write access to /data/*
+    // TODO research how this path is constructed
+    auto pid = getpid();
+    shim::rewrite_filesystem_access = {
+        // Minecraft 1.16.210 or older
+        {"/data/data/com.mojang.minecraftpe", PathHelper::getPrimaryDataDirectory()},
+        // Minecraft 1.16.210 or later, absolute path on linux (source build ubuntu 20.04)
+        {std::string("/data/data") + PathHelper::getParentDir(PathHelper::getAppDir()) + "/proc/" + std::to_string(pid) + "/cmdline", PathHelper::getPrimaryDataDirectory()}};
+    if(argc >= 1 && argv != nullptr && argv[0] != nullptr && argv[0][0] != '\0') {
+        // Minecraft 1.16.210 or later, relative path on linux (source build ubuntu 20.04) or every path AppImage / flatpak
+        shim::rewrite_filesystem_access.emplace_back(argv[0][0] == '/' ? std::string("/data/data") + argv[0] : std::string("/data/data/") + argv[0], PathHelper::getPrimaryDataDirectory());
+    }
+    // Minecraft 1.16.210 or later, macOS
+    shim::rewrite_filesystem_access.emplace_back("/data/data", PathHelper::getPrimaryDataDirectory());
+    // vanilla_music isn't loaded via AAssetManager, it uses libc-shim via relative filepath
+    shim::rewrite_filesystem_access.emplace_back(".", PathHelper::getGameDir() + "assets/");
+#if !defined(__linux__)
+    // fake proc fs needed for macOS and windows
+    shim::rewrite_filesystem_access.emplace_back("/proc", fakeproc);
+    shim::rewrite_filesystem_access.emplace_back("/sys", fakesys);
+#endif
+    for(auto&& redir : shim::rewrite_filesystem_access) {
+        Log::trace("REDIRECT", "%s to %s", redir.first.data(), redir.second.data());
+    }
+    auto libC = MinecraftUtils::getLibCSymbols();
+    ThreadMover::hookLibC(libC);
+
+#ifdef USE_ARMHF_SUPPORT
+    linker::load_library("ld-android.so", {});
+    android_dlextinfo extinfo;
+    std::vector<mcpelauncher_hook_t> hooks;
+    for(auto&& entry : libC) {
+        hooks.emplace_back(mcpelauncher_hook_t{entry.first.data(), entry.second});
+    }
+    hooks.emplace_back(mcpelauncher_hook_t{nullptr, nullptr});
+    extinfo.flags = ANDROID_DLEXT_MCPELAUNCHER_HOOKS;
+    extinfo.mcpelauncher_hooks = hooks.data();
+    if(linker::dlopen_ext(PathHelper::findDataFile("lib/" + std::string(PathHelper::getAbiDir()) + "/libc.so").c_str(), 0, &extinfo) == nullptr) {
+        Log::error("LAUNCHER", "Failed to load armhf compat libc.so Original Error: %s", linker::dlerror());
+        return 1;
+    }
+    if(linker::dlopen(PathHelper::findDataFile("lib/" + std::string(PathHelper::getAbiDir()) + "/libm.so").c_str(), 0) == nullptr) {
+        Log::error("LAUNCHER", "Failed to load armhf compat libm.so Original Error: %s", linker::dlerror());
+        return 1;
+    }
+#elif defined(__APPLE__) && defined(__aarch64__)
+    MinecraftUtils::loadLibM();
+    android_dlextinfo extinfo;
+    std::vector<mcpelauncher_hook_t> hooks;
+    for(auto&& entry : libC) {
+        hooks.emplace_back(mcpelauncher_hook_t{entry.first.data(), entry.second});
+    }
+    hooks.emplace_back(mcpelauncher_hook_t{nullptr, nullptr});
+    extinfo.flags = ANDROID_DLEXT_MCPELAUNCHER_HOOKS;
+    extinfo.mcpelauncher_hooks = hooks.data();
+    if(linker::dlopen_ext(PathHelper::findDataFile("lib/" + std::string(PathHelper::getAbiDir()) + "/libc.so").c_str(), 0, &extinfo) == nullptr) {
+        Log::error("LAUNCHER", "Failed to load arm64 variadic compat libc.so Original Error: %s", linker::dlerror());
+        return 1;
+    }
+    if(linker::dlopen(PathHelper::findDataFile("lib/" + std::string(PathHelper::getAbiDir()) + "/liblog.so").c_str(), 0) == nullptr) {
+        Log::error("LAUNCHER", "Failed to load arm64 variadic compat liblog.so Original Error: %s", linker::dlerror());
+        return 1;
+    }
+#else
+    linker::load_library("libc.so", libC);
+    MinecraftUtils::loadLibM();
+#endif
+    MinecraftUtils::setupHybris();
+    try {
+        PathHelper::findGameFile(std::string("lib/") + MinecraftUtils::getLibraryAbi() + "/libminecraftpe.so");
+    } catch(std::exception& e) {
+        Log::error("LAUNCHER", "Could not find the game, use the -dg flag to fix this error. Original Error: %s", e.what());
+        return 1;
+    }
+    linker::update_LD_LIBRARY_PATH(PathHelper::findGameFile(std::string("lib/") + MinecraftUtils::getLibraryAbi()).data());
+    bool fmodLoaded = false;
+    if(!disableFmod) {
+        try {
+            MinecraftUtils::loadFMod();
+            fmodLoaded = true;
+        } catch(std::exception& e) {
+            Log::info("FMOD", "Failed to load host libfmod: '%s', use pulseaudio/sdl3 backend with android fmod if available", e.what());
+        }
+    }
+    FakeEGL::setProcAddrFunction((void* (*)(const char*))windowManager->getProcAddrFunc());
+    FakeEGL::installLibrary();
+    if(options.graphicsApi == GraphicsApi::OPENGL_ES2) {
+        // GLFW needs a window to let eglGetProcAddress return symbols
+        FakeLooper::initWindow();
+#ifdef USE_IMGUI
+        gladLoadGLES2Loader(fake_egl::eglGetProcAddress);
+#endif
+        MinecraftUtils::setupGLES2Symbols(fake_egl::eglGetProcAddress);
+    } else {
+        // The glcore patch requires an empty library
+        // Otherwise linker has to hide the symbols from dlsym in libminecraftpe.so
+        linker::load_library("libGLESv2.so", {});
+    }
+
+    std::unordered_map<std::string, void*> android_syms;
+    FakeAssetManager::initHybrisHooks(android_syms);
+    FakeInputQueue::initHybrisHooks(android_syms);
+    FakeLooper::initHybrisHooks(android_syms);
+    FakeWindow::initHybrisHooks(android_syms);
+    SmartStub<android_symbols, std::make_index_sequence<(sizeof(android_symbols) / sizeof(*android_symbols)) - 1>>::AddAll(android_syms);
+    linker::load_library("libandroid.so", android_syms);
+    CorePatches::loadGameWindowLibrary();
+
+#ifdef HAVE_SDL3AUDIO
+    std::unordered_map<std::string, void*> audio_syms;
+    FakeAudio::initHybrisHooks(audio_syms);
+    linker::load_library("libaaudio.so", audio_syms);
+#endif
+
+#ifdef USE_IMGUI
+    linker::load_library("libmcpelauncher_menu.so", {
+                                                        {"mcpelauncher_addmenu", (void*)mcpelauncher_addmenu},
+                                                        {"mcpelauncher_show_window", (void*)mcpelauncher_show_window},
+                                                        {"mcpelauncher_close_window", (void*)mcpelauncher_close_window},
+                                                    });
+#endif
+
+    JniSupport support;
+    ModLoader modLoader;
+    if(!freeOnly.get()) {
+        modLoader.loadModsFromDirectory(PathHelper::getPrimaryDataDirectory() + "mods/", true);
+        for(auto&& d : modDirs) {
+            modLoader.loadModsFromDirectory(d, true);
+        }
+    }
+
+    std::vector<mcpelauncher_hook_t> mcpeHooks;
+    FakeSwappyGL::initHooks(mcpeHooks);
+
+    Log::trace("Launcher", "Loading Minecraft library");
+    support.initPairip();
+    static void* handle = MinecraftUtils::loadMinecraftLib(reinterpret_cast<void*>(&CorePatches::showMousePointer), reinterpret_cast<void*>(&CorePatches::hideMousePointer), reinterpret_cast<void*>(&CorePatches::setFullscreen), reinterpret_cast<void*>(&FakeLooper::onGameActivityClose), mcpeHooks);
+    if(!handle && options.graphicsApi == GraphicsApi::OPENGL) {
+        // Old game version or renderdragon
+        options.graphicsApi = GraphicsApi::OPENGL_ES2;
+        // Unload empty stub library
+        auto libGLESv2 = linker::dlopen("libGLESv2.so", 0);
+        linker::dlclose(libGLESv2);
+        linker::unload_library(libGLESv2);
+        // load fake libGLESv2 library
+        // GLFW needs a window to let eglGetProcAddress return symbols
+        FakeLooper::initWindow();
+        MinecraftUtils::setupGLES2Symbols(fake_egl::eglGetProcAddress);
+#ifdef USE_IMGUI
+        gladLoadGLES2Loader(fake_egl::eglGetProcAddress);
+#endif
+        // preinit Mods using libGLESv2 can only load now
+        if(!freeOnly.get()) {
+            modLoader.loadModsFromDirectory(PathHelper::getPrimaryDataDirectory() + "mods/", true);
+        }
+        // Try load the game again
+        handle = MinecraftUtils::loadMinecraftLib(reinterpret_cast<void*>(&CorePatches::showMousePointer), reinterpret_cast<void*>(&CorePatches::hideMousePointer), reinterpret_cast<void*>(&CorePatches::setFullscreen), reinterpret_cast<void*>(&FakeLooper::onGameActivityClose), mcpeHooks);
+    }
+    if(!handle && !disableFmod) {
+        // 1.21.30.22 technically require newer fmod
+        auto libfmod = linker::dlopen("libfmod.so", 0);
+        linker::dlclose(libfmod);
+        linker::unload_library(libfmod);
+
+        // Try load the game again
+        handle = MinecraftUtils::loadMinecraftLib(reinterpret_cast<void*>(&CorePatches::showMousePointer), reinterpret_cast<void*>(&CorePatches::hideMousePointer), reinterpret_cast<void*>(&CorePatches::setFullscreen), reinterpret_cast<void*>(&FakeLooper::onGameActivityClose), mcpeHooks);
+    }
+    if(!handle) {
+        Log::error("Launcher", "Failed to load Minecraft library, please reinstall or wait for an update to support the new release");
+        return 51;
+    }
+    Log::info("Launcher", "Loaded Minecraft library");
+    Log::debug("Launcher", "Minecraft is at offset 0x%" PRIXPTR, (uintptr_t)MinecraftUtils::getLibraryBase(handle));
+    base = MinecraftUtils::getLibraryBase(handle);
+
+    // Apply Google PairIP DRM workarounds to libPlayFabMultiplayer.so. The
+    // library is brought in as a transitive dependency of libminecraftpe.so;
+    // PairIP scrambles its PLT and encrypts its .data, so without this fixup
+    // the game crashes shortly after the main thread starts. Implementation
+    // is a no-op on non-x86_64 architectures.
+    mcpelauncher::apply_pairip_plt_workaround();
+
+    if(!freeOnly.get()) {
+        modLoader.loadModsFromDirectory(PathHelper::getPrimaryDataDirectory() + "mods/");
+        for(auto&& d : modDirs) {
+            modLoader.loadModsFromDirectory(d);
+        }
+    }
+
+    Log::info("Launcher", "Applying patches");
+    if(v8Flags.get().size()) {
+        void (*V8SetFlagsFromString)(const char* str, int length);
+        V8SetFlagsFromString = (decltype(V8SetFlagsFromString))linker::dlsym(handle, "_ZN2v82V818SetFlagsFromStringEPKc");
+        if(V8SetFlagsFromString) {
+            Log::info("V8", "Applying v8-flags %s", v8Flags.get().data());
+            V8SetFlagsFromString(v8Flags.get().data(), v8Flags.get().size());
+        } else {
+            Log::warn("V8", "Couldn't apply v8-flags %s to the game", v8Flags.get().data());
+        }
+    }
+    if(webrtcdebug.get()) {
+        void (*LogToDebug)(int servity) = (decltype(LogToDebug))linker::dlsym(handle, "_ZN3rtc10LogMessage10LogToDebugENS_15LoggingSeverityE");
+        if(LogToDebug) {
+            LogToDebug(0);
+        }
+        void (*SetLogToStderr)(bool on) = (decltype(SetLogToStderr))linker::dlsym(handle, "_ZN3rtc10LogMessage14SetLogToStderrEb");
+        if(SetLogToStderr) {
+            SetLogToStderr(true);
+        }
+    }
+    bool (*isAndroidTrial)() = (decltype(isAndroidTrial))linker::dlsym(handle, "Java_com_mojang_minecraftpe_MainActivity_isAndroidTrial");
+    bool (*isAndroidChromebook)() = (decltype(isAndroidChromebook))linker::dlsym(handle, "Java_com_mojang_minecraftpe_MainActivity_isAndroidChromebook");
+    bool (*isAndroidAmazon)() = (decltype(isAndroidAmazon))linker::dlsym(handle, "Java_com_mojang_minecraftpe_MainActivity_isAndroidAmazon");
+    bool (*isEduMode)() = (decltype(isEduMode))linker::dlsym(handle, "Java_com_mojang_minecraftpe_MainActivity_isEduMode");
+
+    if(isAndroidTrial && isAndroidTrial()) {
+        Log::info("Launcher", "Detected Trial build");
+    }
+    if(isAndroidChromebook && isAndroidChromebook()) {
+        Log::info("Launcher", "Detected Chromebook build");
+    }
+    if(isAndroidAmazon && isAndroidAmazon()) {
+        Log::info("Launcher", "Detected Amazon build");
+    }
+    if(isEduMode && isEduMode()) {
+        Log::info("Launcher", "Detected Education build");
+    }
+    if(freeOnly.get() && !(isAndroidTrial && isAndroidTrial()) && !(isAndroidAmazon && isAndroidAmazon()) && !(isEduMode && isEduMode())) {
+        Log::error("Launcher", "Something went wrong");
+        return 1;
+    }
+
+    SymbolsHelper::initSymbols(handle);
+    CorePatches::install(handle);
+#ifdef __i386__
+    TexelAAPatch::install(handle);
+    HbuiPatch::install(handle);
+    SplitscreenPatch::install(handle);
+    ShaderErrorPatch::install(handle);
+
+#elif __x86_64__
+    if(Settings::enable_intel_sprint_strafe_patch) {
+        StrafeSprintPatch::install(handle);
+    }
+#endif
+    if(options.graphicsApi == GraphicsApi::OPENGL) {
+        try {
+            GLCorePatch::install(handle);
+        } catch(const std::exception& ex) {
+            Log::error("GLCOREPATCH", "Failed to apply glcorepatch: %s", ex.what());
+            options.graphicsApi = GraphicsApi::OPENGL_ES2;
+        }
+    }
+
+    Log::info("Launcher", "Initializing JNI");
+
+    FakeLooper::setJniSupport(&support);
+    support.registerMinecraftNatives(+[](const char* sym) -> void* {
+        void* result = linker::dlsym(handle, sym);
+        if (result) return result;
+        // Stubs for JNI natives MC expects but no library exports (1.26.20.4+).
+        // Google Play Integrity API doesn't apply on Linux desktop, so the
+        // completion callback is a no-op.
+        if (strcmp(sym, "Java_com_mojang_minecraftpe_PlayIntegrity_nativePlayIntegrityComplete") == 0)
+            return (void*)(+[](void*, void*) -> void {});
+        return nullptr;
+    });
+    std::thread startThread([&support]() {
+        ThreadMover::storeStartThreadId();
+        support.startGame((ANativeActivity_createFunc*)linker::dlsym(handle, "ANativeActivity_onCreate"), (GameActivity_createFunc*)linker::dlsym(handle, "GameActivity_onCreate"),
+                          linker::dlsym(handle, "stbi_load_from_memory"),
+                          linker::dlsym(handle, "stbi_image_free"));
+        linker::dlclose(handle);
+    });
+    startThread.detach();
+
+    std::unique_ptr<RpcCallbackServer> file_handler;
+    try {
+        FileUtil::mkdirRecursive(defaultDataDir);
+        file_handler = std::make_unique<RpcCallbackServer>(defaultDataDir + "file_handler", support);
+    } catch(const std::exception& ex) {
+        Log::error("Launcher", "Failed to bind file_handler, you may be unable to import files: %s", ex.what());
+    }
+
+#ifdef __x86_64__
+    if(MinecraftVersion::isExactly(1, 26, 0, 2)) {
+        // Fix corrupted __emutls_control structs in libminecraftpe.so
+        // The v1.26 binary has 71 emutls controls but 2 have invalid data due to
+        // linker symbol collisions. Patch them to valid {size=8, align=8, index=0, templ=NULL}.
+        {
+            struct EmutlsControl {
+                size_t size;
+                size_t align;
+                uintptr_t index;
+                void* templ;
+            };
+            static const uintptr_t bad_controls[] = {
+                0x13701258,  // overlaps with rand_meth data (garbage bytes)
+            };
+            for (auto offset : bad_controls) {
+                auto* ctrl = (EmutlsControl*)((uintptr_t)base + offset);
+                ctrl->size = 8;
+                ctrl->align = 8;
+                ctrl->index = 0;
+                ctrl->templ = nullptr;
+                Log::info("Launcher", "Fixed corrupted emutls control at base+0x%lx", (unsigned long)offset);
+            }
+        }
+    }
+
+    // Generalized __emutls_get_address sanitizing hook.
+    //
+    // Background: the v1.26.0.2 fix above patches one specific corrupted
+    // __emutls_control offset that PR #132 reverse-engineered for that build.
+    // Newer Bedrock releases (1.26.10.x, 1.26.20.x, 1.26.30.x, ...) hit the
+    // same class of LLD bug — symbols colliding with __emutls_v.* — but at
+    // different offsets in libminecraftpe.so, and the bad controls vary
+    // between point releases. Hand-finding offsets per build doesn't scale.
+    //
+    // Approach: hook __emutls_get_address in libc++_shared.so (the only impl
+    // libminecraftpe.so imports) and sanitize any control whose first two
+    // fields (size, align) are both runtime-pointer-sized. Real controls have
+    // size <1MB and align ≤4096; only data overlaid by another symbol's
+    // pointer-laden bytes (the collision pattern) ever matches the heuristic.
+    // Resets the struct to {size=8, align=8, index=0, templ=NULL} before
+    // tail-calling the original.
+    //
+    // The hook copies 16 bytes from the function entry to a trampoline so the
+    // original instructions still execute (libc++_shared's __emutls_get_address
+    // begins with 6× push, mov %rdi,%rbx, mov 0x10(%rdi),%r13 — exactly 16
+    // bytes covering complete instruction boundaries). The patched 13 bytes
+    // are `movabs $wrapper, %r11; jmp *%r11`.
+    {
+        void* libcxx = linker::dlopen("libc++_shared.so", RTLD_NOLOAD);
+        void* orig_emutls = libcxx ? linker::dlsym(libcxx, "__emutls_get_address") : nullptr;
+        if (!orig_emutls) {
+            Log::warn("Launcher", "Could not locate __emutls_get_address for hooking");
+        } else {
+            Log::info("Launcher", "__emutls_get_address at %p, installing sanitizing hook", orig_emutls);
+            uint8_t* tramp = (uint8_t*)mmap(nullptr, 4096, PROT_READ | PROT_WRITE | PROT_EXEC,
+                                            MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            if (tramp == MAP_FAILED) {
+                Log::warn("Launcher", "mmap for emutls trampoline failed; not installing hook");
+            } else {
+                static uint8_t* g_tramp;
+                g_tramp = tramp;
+                memcpy(tramp, orig_emutls, 16);
+                tramp[16] = 0x49; tramp[17] = 0xbb;  // mov $imm64, %r11
+                *(uint64_t*)(tramp + 18) = (uint64_t)orig_emutls + 16;
+                tramp[26] = 0x41; tramp[27] = 0xff; tramp[28] = 0xe3;  // jmp *%r11
+
+                static auto wrapper = +[](void* control) -> void* {
+                    uint64_t* c = (uint64_t*)control;
+                    if (c[0] >= 0x10000000ULL && c[1] >= 0x10000000ULL) {
+                        c[0] = 8;
+                        c[1] = 8;
+                        c[2] = 0;
+                        c[3] = 0;
+                    }
+                    typedef void* (*emutls_fn_t)(void*);
+                    return ((emutls_fn_t)g_tramp)(control);
+                };
+
+                uintptr_t page = (uintptr_t)orig_emutls & ~(uintptr_t)(getpagesize() - 1);
+                size_t span = ((uintptr_t)orig_emutls + 13 - page + getpagesize() - 1)
+                              & ~(uintptr_t)(getpagesize() - 1);
+                if (mprotect((void*)page, span, PROT_READ | PROT_WRITE | PROT_EXEC) == 0) {
+                    uint8_t patch[13];
+                    patch[0] = 0x49; patch[1] = 0xbb;
+                    *(uint64_t*)(patch + 2) = (uint64_t)(void*)wrapper;
+                    patch[10] = 0x41; patch[11] = 0xff; patch[12] = 0xe3;
+                    memcpy(orig_emutls, patch, 13);
+                    mprotect((void*)page, span, PROT_READ | PROT_EXEC);
+                    Log::info("Launcher", "__emutls_get_address sanitizing hook installed");
+                } else {
+                    Log::warn("Launcher", "mprotect failed; emutls hook not installed");
+                }
+            }
+        }
+    }
+#endif
+    // Vibrant Visuals Crash Nvidia
+    // Issue: https://github.com/minecraft-linux/mcpelauncher-manifest/issues/1584
+    if(MinecraftVersion::isAtLeast(1, 21, 130, 0)) {
+        auto _glGetString = (const char*(*)(int)) windowManager->getProcAddrFunc()("glGetString");
+        if(_glGetString) {
+            auto renderer = _glGetString(0x1F01); // GL_RENDERER
+            if(renderer != nullptr && strstr(renderer, "NVIDIA") != nullptr) {
+                properties::property_list properties(':');
+                properties::property<int> volumetricFogQuality(properties, "volumetric_fog_quality", 0);
+                parseOptions(properties);
+                if(volumetricFogQuality.get() != 0) {
+                    Log::warn("Launcher", "Vibrant Visuals volumetric Fog via NVIDIA drivers are not supported causing crashs when entering worlds / server, disabling this graphics mode!");
+                }
+                volumetricFogQuality.set(0);
+                saveOptions(properties);
+            }
+        }
+    }
+
+    Log::info("Launcher", "Executing main thread");
+    ThreadMover::executeMainThread();
+    support.setLooperRunning(false);
+
+    //    XboxLivePatches::workaroundShutdownFreeze(handle);
+    XboxLiveHelper::getInstance().shutdown();
+    // Workaround for XboxLive ShutdownFreeze
+    _Exit(0);
+    return 0;
+}
+
+void printVersionInfo() {
+    printf("mcpelauncher-client %s / manifest %s\n", CLIENT_GIT_COMMIT_HASH, MANIFEST_GIT_COMMIT_HASH);
+#if defined(__i386__) || defined(__x86_64__)
+    CpuId cpuid;
+    printf("CPU: %s %s\n", cpuid.getManufacturer(), cpuid.getBrandString());
+    printf("SSSE3 support: %s\n", cpuid.queryFeatureFlag(CpuId::FeatureFlag::SSSE3) ? "YES" : "NO");
+#endif
+    auto windowManager = GameWindowManager::getManager();
+    GraphicsApi graphicsApi = GLCorePatch::mustUseDesktopGL() ? GraphicsApi::OPENGL : GraphicsApi::OPENGL_ES2;
+    auto window = windowManager->createWindow("mcpelauncher", 32, 32, graphicsApi);
+    auto glGetString = (const char* (*)(int))windowManager->getProcAddrFunc()("glGetString");
+    printf("GL Vendor: %s\n", glGetString(0x1F00 /* GL_VENDOR */));
+    printf("GL Renderer: %s\n", glGetString(0x1F01 /* GL_RENDERER */));
+    printf("GL Version: %s\n", glGetString(0x1F02 /* GL_VERSION */));
+    printf("MSA daemon path: %s\n", XboxLiveHelper::findMsa().c_str());
+}
+
+void readOptions() {
+    properties::property_list properties(':');
+    properties::property<int> leftKey(properties, "keyboard_type_0_key.left", 'A');
+    properties::property<int> downKey(properties, "keyboard_type_0_key.back", 'S');
+    properties::property<int> rightKey(properties, "keyboard_type_0_key.right", 'D');
+    properties::property<int> upKey(properties, "keyboard_type_0_key.forward", 'W');
+
+    properties::property<int> leftKeyFullKeyboard(properties, "keyboard_type_1_key.left", 'A');
+    properties::property<int> downKeyFullKeyboard(properties, "keyboard_type_1_key.back", 'S');
+    properties::property<int> rightKeyFullKeyboard(properties, "keyboard_type_1_key.right", 'D');
+    properties::property<int> upKeyFullKeyboard(properties, "keyboard_type_1_key.forward", 'W');
+
+    properties::property<bool> fullKeyboard(properties, "ctrl_fullkeyboardgameplay", false);
+
+    parseOptions(properties);
+
+    if(leftKey > 512 || downKey > 512 || rightKey > 512 || upKey > 512 || leftKeyFullKeyboard > 512 || downKeyFullKeyboard > 512 || rightKeyFullKeyboard > 512 || upKeyFullKeyboard > 512) {
+        Log::trace("BUG", "Launcher Release v1.7.2 might caused corruption reset Direction to WASD");
+        leftKey.set('A');
+        leftKeyFullKeyboard.set('A');
+        downKey.set('S');
+        downKeyFullKeyboard.set('S');
+        rightKey.set('D');
+        rightKeyFullKeyboard.set('D');
+        upKey.set('W');
+        upKeyFullKeyboard.set('W');
+        saveOptions(properties);
+    }
+
+    GameOptions::leftKey = leftKey;
+    GameOptions::downKey = downKey;
+    GameOptions::rightKey = rightKey;
+    GameOptions::upKey = upKey;
+
+    GameOptions::leftKeyFullKeyboard = leftKeyFullKeyboard;
+    GameOptions::downKeyFullKeyboard = downKeyFullKeyboard;
+    GameOptions::rightKeyFullKeyboard = rightKeyFullKeyboard;
+    GameOptions::upKeyFullKeyboard = upKeyFullKeyboard;
+
+    GameOptions::fullKeyboard = fullKeyboard;
+}
