@@ -38,6 +38,10 @@ jobs:
           chown -R builder:builder /__w
           su builder -c "makepkg -f --noconfirm"
 
+      - name: Install core package (dependency of the UI)
+        run: |
+          pacman -U --noconfirm "$GITHUB_WORKSPACE"/packaging/core/*.pkg.tar.zst
+
       - name: Build mcpelauncher-ui
         working-directory: packaging/ui
         run: |
