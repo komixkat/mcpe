@@ -8,6 +8,7 @@ pkgdesc="Minecraft: Pocket Edition launcher for Linux"
 arch=('x86_64')
 url="https://github.com/komixkat/mcpe"
 license=('GPL-3.0-only' 'custom')
+options=('!debug')
 makedepends=('git' 'cmake' 'clang' 'make')
 depends=('curl' 'libx11' 'zlib' 'libpng' 'libevdev' 'systemd' 'libxi' 'libegl' 'qt6-base' 'qt6-declarative' 'qt6-webengine' 'libuv')
 optdepends=('mcpelauncher-ui: GUI for Launcher')

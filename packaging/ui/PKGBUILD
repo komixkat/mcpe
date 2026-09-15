@@ -8,6 +8,7 @@ pkgdesc="Minecraft: PE Linux launcher UI"
 arch=('x86_64')
 url="https://github.com/komixkat/mcpe"
 license=('GPL-3.0-only' 'MIT')
+options=('!debug')
 makedepends=('git' 'cmake' 'ninja' 'qt6-tools' 'vulkan-headers' 'qt6-svg' 'libxinerama')
 depends=('qt6-base' 'qt6-webengine' 'qt6-declarative' 'libzip' 'protobuf' 'mcpelauncher-linux' 'zlib' 'curl' 'glibc' 'qt6-webchannel' 'openssl' 'hicolor-icon-theme' 'desktop-file-utils')
 optdepends=('mcpelauncher-msa-ui-qt: Microsoft authentication for version before 1.16.1X')
