@@ -1,108 +1,67 @@
-# mcpelauncher (komixkat fork — fixed build)
+# mcpelauncher
 
-A fixed fork of the unofficial Linux launcher for the Android version of
-**Minecraft: Bedrock Edition** (based on the `qt6` branch of the
-mcpelauncher monorepo).
+A Linux launcher for Minecraft: Bedrock Edition (Android builds).
 
-Unlike upstream, this build ships with the launch-crashing PairIP/emutls
-hacks **disabled** and relies on the `mcpelauncher-updates` mod to handle
-PairIP/PlayFab decryption at runtime. This makes recent Bedrock versions
-(1.26.x) boot instead of crashing in an infinite JNI_OnLoad recursion.
+This repository contains the launcher source code, build files, and the
+runtime mod required to run recent game versions.
 
----
+## Requirements
 
-## Install (Arch Linux / CachyOS / any pacman distro)
+| Item | Requirement |
+|------|-------------|
+| OS | Linux (glibc, x86_64) |
+| Toolchain | CMake 3.5+, Clang, Make |
+| Runtime | Qt 6, curl, libpng, libevdev, systemd, libxi, libegl, libuv, zlib |
 
-### Option A — Prebuilt package (recommended)
-
-1. Download/build `mcpelauncher-linux-git-1.7.6.r2.gb4805a2-2-x86_64.pkg.tar.zst`.
-   If you have the `mcpelauncher-linux-git` AUR dir checked out locally, run:
-   ```bash
-   makepkg -f --noconfirm        # ~10 min, builds from mcpe.tar.gz snapshot
-   sudo pacman -U mcpelauncher-linux-git-1.7.6.r2.gb4805a2-2-x86_64.pkg.tar.zst
-   ```
-2. Install the launcher UI (login / version management):
-   ```bash
-   yay -S mcpelauncher-ui        # or from AUR cache if already fetched
-   ```
-
-### Option B — Build from source in this repo
+## Build
 
 ```bash
-git clone --recurse-submodules -b qt6 https://github.com/komixkat/mcpe.git
+git clone --recurse-submodules -b qt6-fixed https://github.com/komixkat/mcpe.git
 cd mcpe
-cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
-cmake --build build -j$(nproc)
-# binaries land in build/mcpelauncher-client/mcpelauncher-client etc.
+cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
+cmake --build build --parallel
 ```
 
-> **Note:** AUR PKGBUILD `makepkg` must build from the bundled `mcpe.tar.gz`
-> snapshot, NOT from upstream submodules — the submodule origins in the
-> monorepo's `.gitmodules` are relative/local paths that only resolve inside
-> the original workspace.
+The launcher binaries are created in `build/mcpelauncher-client/`.
 
----
+## Install and run
 
-## First run — the mod (REQUIRED for 1.26.x)
+1. Install the launcher UI for login and version management:
+   `mcpelauncher-ui` (AUR) or https://github.com/minecraft-linux/mcpelauncher-ui-manifest
 
-The launcher needs the **updates mod** deployed at exactly these paths
-(it is NOT part of the package):
-
-```
-~/.local/share/mcpelauncher/mods/libmcpelauncher-updates.so
-~/.local/share/mcpelauncher/mods/patches/libPlayFabMultiplayer.so
-~/.local/share/mcpelauncher/mods/patches/v1.26.0.2/x86_64/libmaesdk.so
-```
-
-Deployed `libmcpelauncher-updates.so` must be the extended build (45.6 MB,
-zip-dated 2026-07-11) that carries the extra `apply_rt0_style_patches` /
-`g_hardware_candidate_patches` / wide version ranges — the GitHub master
-version does **not** cover 1.26.45.1.
-
-## Login & account
-
-1. Launch `mcpelauncher-ui`.
-2. Log in fresh (Xbox / Microsoft). **Do NOT** carry over tokens from an old
-   install or from flatpak — stale + device-bound tokens cause repeated
-   auth failures and Microsoft account lockouts (30 min–24 h).
-3. If you were locked out, wait it out, then log in again on a clean
-   `~/.local/share/mcpelauncher` (erase it for a fully fresh login).
-
-## Running
+2. Deploy the updates mod. The mod is required for recent game versions.
 
 ```bash
-EGL_PLATFORM=x11 SDL_VIDEODRIVER=x11 mcpelauncher-client -dg ~/.local/share/mcpelauncher/versions/<version>
-# e.g.
-EGL_PLATFORM=x11 SDL_VIDEODRIVER=x11 mcpelauncher-client -dg ~/.local/share/mcpelauncher/versions/1.26.45.1
+mkdir -p ~/.local/share/mcpelauncher
+cp -r mods ~/.local/share/mcpelauncher/
 ```
 
-`EGL_PLATFORM=x11` is required on Wayland sessions.
+3. Launch:
 
----
+```bash
+EGL_PLATFORM=x11 SDL_VIDEODRIVER=x11 build/mcpelauncher-client/mcpelauncher-client -dg ~/.local/share/mcpelauncher/versions/1.26.45.1
+```
 
-## What's fixed in this fork
+A fresh login is required on first use. Do not copy tokens from another
+installation; stale tokens cause repeated Microsoft account lockouts.
 
-| Issue | Status |
-|------|--------|
-| Wayland/EGL boot failure | Fixed |
-| `pthread_sigmask` / `div` / `ldiv` missing-symbol crashes | Fixed |
-| PairIP/emutls infinite JNI recursion on 1.26.x | Fixed by deferring to the mod |
-| Game boots on 1.26.45.1 | Confirmed |
-| UI texture loading ("unknown image type") | **Known upstream cosmetic bug** — 3D world renders, UI textures blank; affects all launcher versions incl. flatpak |
-| Websocket/XBL signaling hang | Investigation pending a valid login |
-| 1.26.0.2 / 1.26.60.23 | Untested with mod |
+## archlinux package
 
-## Troubleshooting
+An Arch package (PKGBUILD) used to create a binary package from this source
+is included in `packaging/`:
 
-- **Crashes on launch after version download:** the mod/patches are missing
-  or wrong paths — re-deploy the mod files above.
-- **Account temporarily locked:** wait 30 min–24 h, do not spam login,
-  then log in fresh on a wiped `~/.local/share/mcpelauncher`.
-- **Crashes inside Minecraft libs:** use `lldb`, not `gdb` (the custom NDK
-  loader only notifies lldb).
-- **Textures/UI blank but 3D world renders:** cosmetic upstream bug, see table.
+```bash
+cd packaging
+makepkg -f
+sudo pacman -U mcpelauncher-linux-git-*.pkg.tar.zst
+```
 
-## Related
+## The updates mod
 
-- Upstream UI: https://github.com/minecraft-linux/mcpelauncher-ui-manifest
-- Docs/wiki: https://mcpelauncher.readthedocs.io
+`mods/libmcpelauncher-updates.so` and the files in `mods/patches/` provide
+the PairIP and PlayFab runtime patches. The launcher loads the mod from
+`~/.local/share/mcpelauncher/mods/`. The mod must not be removed.
+
+## License
+
+GPL-3.0-only. See `LICENSE` for details.

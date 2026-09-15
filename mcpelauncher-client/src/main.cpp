@@ -699,7 +699,7 @@ Hardware	: Qualcomm Technologies, Inc MSM8998
     }
 
     // Generalized __emutls_get_address sanitizing hook.
-    // DISABLED — libmcpelauncher-updates mod already hooks __emutls_get_address
+    // DISABLED: libmcpelauncher-updates mod already hooks __emutls_get_address
     // (mcpelauncher_relocate on libc++_shared) in its add_symbols(). Double
     // hooking caused a VM recursion in libminecraftpe's JNI_OnLoad.
     if(false) {

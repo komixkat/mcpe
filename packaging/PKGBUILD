@@ -1,0 +1,61 @@
+# Arch Linux package for MCPE launcher, built from source in this repo.
+# The launcher code, the updates mod, and the patches all come from GitHub.
+
+pkgname=mcpelauncher-linux-git
+pkgver=1.7.6.r2.gd9cd7f9
+pkgrel=1
+pkgdesc="Minecraft: Pocket Edition launcher for Linux"
+arch=('x86_64' 'i686')
+url="https://github.com/komixkat/mcpe"
+license=('GPL-3.0-only' 'custom')
+makedepends=('git' 'cmake' 'clang' 'make')
+depends=('curl' 'libx11' 'zlib' 'libpng' 'libevdev' 'systemd' 'libxi' 'libegl' 'qt6-base' 'qt6-declarative' 'qt6-webengine' 'libuv')
+optdepends=('mcpelauncher-ui: GUI for Launcher')
+provides=('mcpelauncher-client' 'mcpelauncher-linux')
+conflicts=('mcpelauncher-client' 'mcpelauncher-linux')
+
+pkgver() {
+  cd mcpe
+  git describe --long --tags | sed 's/^v//; s/\([^-]*-g\)/r\1/; s/-/./g'
+}
+
+source=(
+  "git+https://github.com/komixkat/mcpe.git#branch=qt6-fixed"
+)
+md5sums=('SKIP')
+
+prepare() {
+  cd mcpe
+  git submodule update --init --recursive
+}
+
+build() {
+  export CFLAGS="${CFLAGS//-Wp,-D_FORTIFY_SOURCE=3/}"
+  export CXXFLAGS="${CXXFLAGS//-Wp,-D_FORTIFY_SOURCE=3/}"
+  cmake -S mcpe \
+    -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+    -DCMAKE_C_COMPILER=clang \
+    -DCMAKE_CXX_COMPILER=clang++ \
+    -B build -DCMAKE_INSTALL_PREFIX=/usr \
+    -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+    -DENABLE_DEV_PATHS=OFF \
+    -Wno-dev
+  cmake --build build --parallel
+}
+
+package() {
+  libdir="$pkgdir/usr/share/mcpelauncher/lib"
+  make -C build DESTDIR="$pkgdir" install
+  if [[ $CARCH == "i686" ]]; then
+    mv "$pkgdir/usr/bin/mcpelauncher-client" "$pkgdir/usr/bin/mcpelauncher-client32"
+    rm -rf "$libdir/native/x86_64" "$libdir/x86_64" "$libdir/armeabi-v7a" "$libdir/arm64-v8a"
+  fi
+  if [[ $CARCH == "x86_64" ]]; then
+    rm -rf "$libdir/native/x86" "$libdir/x86" "$libdir/armeabi-v7a" "$libdir/arm64-v8a"
+  fi
+
+  install -Dm644 mcpe/LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 mcpe/msa-daemon-client/LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE.MIT"
+  install -Dm644 "mcpe/mcpelauncher-linux-bin/FMod License.txt" "$pkgdir/usr/share/licenses/$pkgname/fmod_license.txt"
+  install -Dm644 mcpe/eglut/LICENSE "$pkgdir/usr/share/licenses/$pkgname/eglut_license.txt"
+}
