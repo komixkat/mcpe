@@ -66,13 +66,8 @@ jobs:
           cp "$GITHUB_WORKSPACE"/packaging/ui/*.pkg.tar.zst "$dist/"
           sha256sum "$dist"/*.pkg.tar.zst > "$dist/SHA256SUMS.txt"
           gh release delete latest --repo komixkat/mcpe --yes --cleanup-tag 2>/dev/null || true
+          printf 'Automated build of the fixed qt6 launcher.\n\nInstall with:\n\n```bash\ncurl -sL https://raw.githubusercontent.com/komixkat/mcpe/qt6/install.sh | bash\n```\n' > "$dist/notes.md"
           gh release create latest "$dist"/* \
             --repo komixkat/mcpe \
             --title "mcpelauncher (latest build)" \
-            --notes "Automated build of the fixed qt6 launcher.
-
-Install with:
-
-\`\`\`bash
-curl -sL https://raw.githubusercontent.com/komixkat/mcpe/qt6/install.sh | bash
-\`\`\`"
+            --notes-file "$dist/notes.md"

@@ -24,17 +24,17 @@ jobs:
         run: |
           MANIFEST_HEAD=$(curl -s "https://api.github.com/repos/minecraft-linux/mcpelauncher-manifest/commits/qt6" | grep -m1 '"sha"' | sed 's/.*"sha": "//;s/".*//')
           CLIENT_PIN=$(curl -s "https://api.github.com/repos/minecraft-linux/mcpelauncher-manifest/git/trees/qt6?recursive=1" | python3 -c "
-import json,sys
-d=json.load(sys.stdin)
-for t in d.get('tree',[]):
-    if t['path'] == 'mcpelauncher-client': print(t['sha'])
-" )
+          import json,sys
+          d=json.load(sys.stdin)
+          for t in d.get('tree',[]):
+              if t['path'] == 'mcpelauncher-client': print(t['sha'])
+          " )
           CORE_PIN=$(curl -s "https://api.github.com/repos/minecraft-linux/mcpelauncher-manifest/git/trees/qt6?recursive=1" | python3 -c "
-import json,sys
-d=json.load(sys.stdin)
-for t in d.get('tree',[]):
-    if t['path'] == 'mcpelauncher-core': print(t['sha'])
-" )
+          import json,sys
+          d=json.load(sys.stdin)
+          for t in d.get('tree',[]):
+              if t['path'] == 'mcpelauncher-core': print(t['sha'])
+          " )
           echo "NEW_MANIFEST=$MANIFEST_HEAD" >> "$GITHUB_ENV"
           echo "NEW_CLIENT=$CLIENT_PIN" >> "$GITHUB_ENV"
           echo "NEW_CORE=$CORE_PIN" >> "$GITHUB_ENV"
@@ -77,17 +77,8 @@ for t in d.get('tree',[]):
           git add packaging/upstream.state
           git commit -m "sync: record upstream qt6 $NEW_MANIFEST"
           git push origin "$BRANCH"
+          printf 'The upstream launcher moved.\n\n- manifest qt6: **%s**\n- mcpelauncher-client: **%s**\n- mcpelauncher-core: **%s**\n\nThe vendored sources and fixes in this repo still target the old state:\n- %s\n- %s\n- %s\n\nReview what changed upstream and refresh the vendored directories and packaging/fixes patches. The build workflow does not run until this PR is merged.\n' \
+            "$NEW_MANIFEST" "$NEW_CLIENT" "$NEW_CORE" "$OLD_MANIFEST" "$OLD_CLIENT" "$OLD_CORE" > body.md
           gh pr create "--title=Upstream qt6 changed to $NEW_MANIFEST" \
-            --body "The upstream launcher moved.
-
-- manifest qt6: **$NEW_MANIFEST**
-- mcpelauncher-client: **$NEW_CLIENT**
-- mcpelauncher-core: **$NEW_CORE**
-
-The vendored sources and fixes in this repo still target the old state:
-- $OLD_MANIFEST
-- $OLD_CLIENT
-- $OLD_CORE
-
-Review what changed upstream and refresh the vendored directories and packaging/fixes patches. The build workflow does not run until this PR is merged." \
+            --body-file body.md \
             --base qt6 --head "$BRANCH" || true
