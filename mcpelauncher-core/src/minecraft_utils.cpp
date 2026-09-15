@@ -22,7 +22,6 @@
 #include <pthread.h>
 #endif
 #include <unistd.h>
-#include <sys/mman.h>
 #include <sys/wait.h>
 #include <sys/stat.h>
 #include <stdexcept>

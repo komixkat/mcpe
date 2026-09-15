@@ -66,11 +66,7 @@
 // Applying the fixup here, rather than after loadMinecraftLib() returns,
 // closes that window. Idempotence is handled inside the workaround.
 extern "C" void mcpelauncher_linker_on_load_so(const char* filename, size_t base) {
-    if (filename && strstr(filename, "libPlayFabMultiplayer.so") != nullptr) {
-        Log::info("Launcher", "PairIP: pre-constructor fixup for %s @ 0x%lx",
-                  filename, (unsigned long)base);
-        mcpelauncher::apply_pairip_plt_workaround_for(base, "libPlayFabMultiplayer.so");
-    }
+    (void)filename; (void)base;
 }
 #endif
 
@@ -527,7 +523,7 @@ Hardware	: Qualcomm Technologies, Inc MSM8998
     FakeSwappyGL::initHooks(mcpeHooks);
 
     Log::trace("Launcher", "Loading Minecraft library");
-    support.initPairip();
+    // support.initPairip();  // mod handles pairipcore JNI_OnLoad now
     static void* handle = MinecraftUtils::loadMinecraftLib(reinterpret_cast<void*>(&CorePatches::showMousePointer), reinterpret_cast<void*>(&CorePatches::hideMousePointer), reinterpret_cast<void*>(&CorePatches::setFullscreen), reinterpret_cast<void*>(&FakeLooper::onGameActivityClose), mcpeHooks);
     if(!handle && options.graphicsApi == GraphicsApi::OPENGL) {
         // Old game version or renderdragon
@@ -572,7 +568,7 @@ Hardware	: Qualcomm Technologies, Inc MSM8998
     // PairIP scrambles its PLT and encrypts its .data, so without this fixup
     // the game crashes shortly after the main thread starts. Implementation
     // is a no-op on non-x86_64 architectures.
-    mcpelauncher::apply_pairip_plt_workaround();
+    // mcpelauncher::apply_pairip_plt_workaround();  // mod handles PlayFab PLT
 
     if(!freeOnly.get()) {
         modLoader.loadModsFromDirectory(PathHelper::getPrimaryDataDirectory() + "mods/");
@@ -703,28 +699,10 @@ Hardware	: Qualcomm Technologies, Inc MSM8998
     }
 
     // Generalized __emutls_get_address sanitizing hook.
-    //
-    // Background: the v1.26.0.2 fix above patches one specific corrupted
-    // __emutls_control offset that PR #132 reverse-engineered for that build.
-    // Newer Bedrock releases (1.26.10.x, 1.26.20.x, 1.26.30.x, ...) hit the
-    // same class of LLD bug — symbols colliding with __emutls_v.* — but at
-    // different offsets in libminecraftpe.so, and the bad controls vary
-    // between point releases. Hand-finding offsets per build doesn't scale.
-    //
-    // Approach: hook __emutls_get_address in libc++_shared.so (the only impl
-    // libminecraftpe.so imports) and sanitize any control whose first two
-    // fields (size, align) are both runtime-pointer-sized. Real controls have
-    // size <1MB and align ≤4096; only data overlaid by another symbol's
-    // pointer-laden bytes (the collision pattern) ever matches the heuristic.
-    // Resets the struct to {size=8, align=8, index=0, templ=NULL} before
-    // tail-calling the original.
-    //
-    // The hook copies 16 bytes from the function entry to a trampoline so the
-    // original instructions still execute (libc++_shared's __emutls_get_address
-    // begins with 6× push, mov %rdi,%rbx, mov 0x10(%rdi),%r13 — exactly 16
-    // bytes covering complete instruction boundaries). The patched 13 bytes
-    // are `movabs $wrapper, %r11; jmp *%r11`.
-    {
+    // DISABLED — libmcpelauncher-updates mod already hooks __emutls_get_address
+    // (mcpelauncher_relocate on libc++_shared) in its add_symbols(). Double
+    // hooking caused a VM recursion in libminecraftpe's JNI_OnLoad.
+    if(false) {
         void* libcxx = linker::dlopen("libc++_shared.so", RTLD_NOLOAD);
         void* orig_emutls = libcxx ? linker::dlsym(libcxx, "__emutls_get_address") : nullptr;
         if (!orig_emutls) {
