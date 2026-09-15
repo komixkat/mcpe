@@ -35,7 +35,7 @@ jobs:
         working-directory: packaging/core
         run: |
           useradd -m builder
-          chown -R builder:builder /__w
+          chown -R builder:builder "$GITHUB_WORKSPACE/packaging/core"
           su builder -c "makepkg -f --noconfirm"
 
       - name: Install core package (dependency of the UI)
@@ -45,7 +45,7 @@ jobs:
       - name: Build mcpelauncher-ui
         working-directory: packaging/ui
         run: |
-          chown -R builder:builder /__w
+          chown -R builder:builder "$GITHUB_WORKSPACE/packaging/ui"
           su builder -c "makepkg -f --noconfirm"
 
       - name: Upload packages
