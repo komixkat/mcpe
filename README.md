@@ -1,66 +1,94 @@
 # mcpelauncher
 
-A Linux launcher for Minecraft: Bedrock Edition (Android builds).
+A Linux launcher for Minecraft: Bedrock Edition (Android builds), with the
+PairIP / PlayFab patches needed to run recent game versions.
 
-This repository contains the launcher source code, build files, and the
-runtime mod required to run recent game versions.
+Everything lives in this one repository: the launcher source, the UI source,
+the runtime mod, the Arch build files, and the auto-build workflow.
 
-## Requirements
-
-| Item | Requirement |
-|------|-------------|
-| OS | Linux (glibc, x86_64) |
-| Toolchain | CMake 3.5+, Clang, Make |
-| Runtime | Qt 6, curl, libpng, libevdev, systemd, libxi, libegl, libuv, zlib |
-
-## Build
+## Install (Arch Linux)
 
 ```bash
-git clone --recurse-submodules -b qt6-fixed https://github.com/komixkat/mcpe.git
+curl -sL https://raw.githubusercontent.com/komixkat/mcpe/qt6/install.sh | bash
+```
+
+This downloads the latest built `mcpelauncher-linux` and `mcpelauncher-ui`
+packages from the GitHub Releases of this repository and installs them with
+pacman. No AUR, no compilation on your machine.
+
+Binaries are rebuilt and published automatically on a weekly schedule (and
+on every push to the `qt6` branch) by the `build` workflow in
+`.github/workflows/`.
+
+## Build from source
+
+Everything is in-tree, including all UI components (vendored from
+`minecraft-linux/mcpelauncher-ui-manifest` into `ui/`).
+
+```bash
+git clone --recurse-submodules -b qt6 https://github.com/komixkat/mcpe.git
 cd mcpe
-cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
-cmake --build build --parallel
+
+# launcher core
+cmake -S . -B build-core -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
+cmake --build build-core --parallel
+
+# UI
+cmake -S ui -B build-ui -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
+cmake --build build-ui --parallel
 ```
 
-The launcher binaries are created in `build/mcpelauncher-client/`.
+## Arch packages
 
-## Install and run
-
-1. Install the launcher UI for login and version management:
-   `mcpelauncher-ui` (AUR) or https://github.com/minecraft-linux/mcpelauncher-ui-manifest
-
-2. Deploy the updates mod. The mod is required for recent game versions.
+- `packaging/core/PKGBUILD` builds `mcpelauncher-linux` (the launcher core from
+  this repo, with the fixes and the updates mod).
+- `packaging/ui/PKGBUILD` builds `mcpelauncher-ui` (the Qt login/version UI,
+  built from the vendored `ui/` directory).
 
 ```bash
-mkdir -p ~/.local/share/mcpelauncher
-cp -r mods ~/.local/share/mcpelauncher/
+cd packaging/core && makepkg -f
+cd ../ui && makepkg -f
+sudo pacman -U mcpelauncher-linux-git-*.pkg.tar.zst mcpelauncher-ui-*.pkg.tar.zst
 ```
 
-3. Launch:
+## Run
+
+Launch `mcpelauncher-ui-qt`, log in, and pick a version. The UI downloads and
+launches the game through `mcpelauncher-client`.
+
+The launcher core still runs on an X11 EGL stack, so on a Wayland session it
+needs these environment variables. The desktop entry installed by the UI
+already sets them, so launching from the application menu is automatic. Only
+terminal launches need the prefix:
 
 ```bash
-EGL_PLATFORM=x11 SDL_VIDEODRIVER=x11 build/mcpelauncher-client/mcpelauncher-client -dg ~/.local/share/mcpelauncher/versions/1.26.45.1
+EGL_PLATFORM=x11 SDL_VIDEODRIVER=x11 mcpelauncher-ui-qt
 ```
 
 A fresh login is required on first use. Do not copy tokens from another
-installation; stale tokens cause repeated Microsoft account lockouts.
+installation, stale tokens cause repeated Microsoft account lockouts.
 
-## archlinux package
+## Updating from upstream
 
-An Arch package (PKGBUILD) used to create a binary package from this source
-is included in `packaging/`:
+The launcher source in this repo tracks `minecraft-linux/mcpelauncher-manifest`
+on the `qt6` branch. The `sync-upstream` workflow (`.github/workflows/`)
+checks weekly for upstream changes and records them in
+`packaging/upstream.state`; if upstream moved it opens a pull request so the
+vendored sources and fix patches (`packaging/core/fixes/`) can be refreshed
+and rebuilt.
 
-```bash
-cd packaging
-makepkg -f
-sudo pacman -U mcpelauncher-linux-git-*.pkg.tar.zst
-```
+## Repository layout
 
-## The updates mod
-
-`mods/libmcpelauncher-updates.so` and the files in `mods/patches/` provide
-the PairIP and PlayFab runtime patches. The launcher loads the mod from
-`~/.local/share/mcpelauncher/mods/`. The mod must not be removed.
+- `mcpelauncher-client/`, `mcpelauncher-core/` and the rest: the launcher
+  source with the login and 1.26.x fixes applied.
+- `ui/`: the Qt launcher UI source (vendored, single-tree).
+- `mods/`: `libmcpelauncher-updates.so` and the PairIP / PlayFab patches that
+  the launcher loads at runtime.
+- `packaging/`: Arch `PKGBUILD`s, the uploaded fix patches, and the recorded
+  upstream state.
+- `install.sh`: the one-command installer.
+- `.github/workflows/`: `build.yml` (compiles and publishes packages) and
+  `sync-upstream.yml` (tracks upstream).
 
 ## License
 

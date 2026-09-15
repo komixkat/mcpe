@@ -1,0 +1,93 @@
+name: sync-upstream
+
+on:
+  schedule:
+    - cron: "0 5 * * 1"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: qt6
+
+      - name: Query upstream state
+        id: upstream
+        run: |
+          MANIFEST_HEAD=$(curl -s "https://api.github.com/repos/minecraft-linux/mcpelauncher-manifest/commits/qt6" | grep -m1 '"sha"' | sed 's/.*"sha": "//;s/".*//')
+          CLIENT_PIN=$(curl -s "https://api.github.com/repos/minecraft-linux/mcpelauncher-manifest/git/trees/qt6?recursive=1" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+for t in d.get('tree',[]):
+    if t['path'] == 'mcpelauncher-client': print(t['sha'])
+" )
+          CORE_PIN=$(curl -s "https://api.github.com/repos/minecraft-linux/mcpelauncher-manifest/git/trees/qt6?recursive=1" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+for t in d.get('tree',[]):
+    if t['path'] == 'mcpelauncher-core': print(t['sha'])
+" )
+          echo "NEW_MANIFEST=$MANIFEST_HEAD" >> "$GITHUB_ENV"
+          echo "NEW_CLIENT=$CLIENT_PIN" >> "$GITHUB_ENV"
+          echo "NEW_CORE=$CORE_PIN" >> "$GITHUB_ENV"
+          echo "manifest=$MANIFEST_HEAD client=$CLIENT_PIN core=$CORE_PIN"
+
+      - name: Compare with recorded state
+        id: compare
+        run: |
+          OLD=$(grep UPSTREAM_MANIFEST_HEAD packaging/upstream.state | cut -d= -f2)
+          OLD_CLIENT=$(grep UPSTREAM_CLIENT_PIN packaging/upstream.state | cut -d= -f2)
+          OLD_CORE=$(grep UPSTREAM_CORE_PIN packaging/upstream.state | cut -d= -f2)
+          echo "OLD_MANIFEST=$OLD" >> "$GITHUB_ENV"
+          echo "OLD_CLIENT=$OLD_CLIENT" >> "$GITHUB_ENV"
+          echo "OLD_CORE=$OLD_CORE" >> "$GITHUB_ENV"
+          echo "old: manifest=$OLD client=$OLD_CLIENT core=$OLD_CORE"
+          echo "new: manifest=$NEW_MANIFEST client=$NEW_CLIENT core=$NEW_CORE"
+          if [ "$OLD" = "$NEW_MANIFEST" ] && [ "$OLD_CLIENT" = "$NEW_CLIENT" ] && [ "$OLD_CORE" = "$NEW_CORE" ]; then
+            echo "NEEDS_SYNC=false" >> "$GITHUB_ENV"
+            echo "No upstream change."
+          else
+            echo "NEEDS_SYNC=true" >> "$GITHUB_ENV"
+            echo "Upstream moved, opening sync PR."
+          fi
+
+      - name: Open sync PR
+        if: env.NEEDS_SYNC == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          sed -i \
+            -e "s|^UPSTREAM_MANIFEST_HEAD=.*|UPSTREAM_MANIFEST_HEAD=$NEW_MANIFEST|" \
+            -e "s|^UPSTREAM_CLIENT_PIN=.*|UPSTREAM_CLIENT_PIN=$NEW_CLIENT|" \
+            -e "s|^UPSTREAM_CORE_PIN=.*|UPSTREAM_CORE_PIN=$NEW_CORE|" \
+            packaging/upstream.state
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          BRANCH="sync/upstream-$NEW_MANIFEST"
+          git fetch origin "$BRANCH" 2>/dev/null && git push origin --delete "$BRANCH"
+          git checkout -b "$BRANCH"
+          git add packaging/upstream.state
+          git commit -m "sync: record upstream qt6 $NEW_MANIFEST"
+          git push origin "$BRANCH"
+          gh pr create "--title=Upstream qt6 changed to $NEW_MANIFEST" \
+            --body "The upstream launcher moved.
+
+- manifest qt6: **$NEW_MANIFEST**
+- mcpelauncher-client: **$NEW_CLIENT**
+- mcpelauncher-core: **$NEW_CORE**
+
+The vendored sources and fixes in this repo still target the old state:
+- $OLD_MANIFEST
+- $OLD_CLIENT
+- $OLD_CORE
+
+Review what changed upstream and refresh the vendored directories and packaging/fixes patches. The build workflow does not run until this PR is merged." \
+            --base qt6 --head "$BRANCH" || true

@@ -1,0 +1,50 @@
+# Arch Linux package for the MCPE launcher UI, built from the vendored
+# mcpelauncher-ui-manifest sources in this repository (ui/ directory).
+
+pkgname=mcpelauncher-ui
+pkgver=1.7.6
+pkgrel=1
+pkgdesc="Minecraft: PE Linux launcher UI"
+arch=('x86_64')
+url="https://github.com/komixkat/mcpe"
+license=('GPL-3.0-only' 'MIT')
+makedepends=('git' 'cmake' 'ninja' 'qt6-tools' 'vulkan-headers' 'qt6-svg' 'libxinerama')
+depends=('qt6-base' 'qt6-webengine' 'qt6-declarative' 'libzip' 'protobuf' 'mcpelauncher-linux' 'zlib' 'curl' 'glibc' 'qt6-webchannel' 'openssl' 'hicolor-icon-theme' 'desktop-file-utils')
+optdepends=('mcpelauncher-msa-ui-qt: Microsoft authentication for version before 1.16.1X')
+provides=('mcpelauncher-ui-qt')
+conflicts=('mcpelauncher-ui-qt')
+
+source=(
+  "git+https://github.com/komixkat/mcpe.git#branch=qt6"
+)
+md5sums=('SKIP')
+
+build() {
+  export CFLAGS="${CFLAGS//-Wp,-D_FORTIFY_SOURCE=3/}"
+  export CXXFLAGS="${CXXFLAGS//-Wp,-D_FORTIFY_SOURCE=3/}"
+  cmake -B build -S mcpe/ui \
+    -G Ninja \
+    -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+    -DCMAKE_INSTALL_PREFIX=/usr \
+    -DCMAKE_BUILD_TYPE=None \
+    -DCMAKE_C_FLAGS="$CFLAGS -DNDEBUG" \
+    -DCMAKE_CXX_FLAGS="$CXXFLAGS -DNDEBUG" \
+    -DLAUNCHER_VERSION_NAME="${pkgver}" \
+    -DLAUNCHER_VERSION_CODE="GIT" \
+    -DLAUNCHER_DISABLE_DEV_MODE=OFF \
+    -Wno-dev
+  cmake --build build
+}
+
+package() {
+  DESTDIR="$pkgdir" cmake --install build
+  install -Dm644 mcpe/ui/mcpelauncher-ui-qt/LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+
+  echo "StartUpWMClass=io.mrarm.mcpelauncher-ui-qt" >> "$pkgdir/usr/share/applications/mcpelauncher-ui-qt.desktop"
+  sed -i 's|^Exec=.*|Exec=env SDL_VIDEODRIVER=x11 EGL_PLATFORM=x11 mcpelauncher-ui-qt %U|' "$pkgdir/usr/share/applications/mcpelauncher-ui-qt.desktop"
+  install -dm755 "$pkgdir/usr/share/icons/hicolor/scalable/apps"
+  mv "$pkgdir/usr/share/pixmaps/mcpelauncher-ui-qt.svg" "$pkgdir/usr/share/icons/hicolor/scalable/apps/io.mrarm.mcpelauncher-ui-qt.svg"
+  rm -rf "$pkgdir/usr/share/pixmaps"
+  mv "$pkgdir/usr/share/applications/mcpelauncher-ui-qt.desktop" "$pkgdir/usr/share/applications/io.mrarm.mcpelauncher-ui-qt.desktop"
+  sed -i 's/Icon=mcpelauncher-ui-qt/Icon=io.mrarm.mcpelauncher-ui-qt/g' "$pkgdir/usr/share/applications/io.mrarm.mcpelauncher-ui-qt.desktop"
+}

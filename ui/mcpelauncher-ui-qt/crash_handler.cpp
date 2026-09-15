@@ -1,0 +1,118 @@
+#include "crash_handler.h"
+
+#include <cstdlib>
+#include <cstdio>
+#include <cstring>
+#include <csignal>
+#include <cxxabi.h>
+#include <execinfo.h>
+#include <thread>
+#include <dlfcn.h>
+#include <unistd.h>
+#include <EnvPathUtil.h>
+
+bool CrashHandler::hasCrashed = false;
+int CrashHandler::argc = 0;
+char** CrashHandler::argv = nullptr;
+
+#define __ASYNC_SAFE_LOG(msg) write(STDERR_FILENO, msg "\n", sizeof(msg "\n"));
+
+void CrashHandler::handleSignal(int signal, void *aptr) {
+    __ASYNC_SAFE_LOG("Please try to restart this application using one of the following methods:");
+    __ASYNC_SAFE_LOG("1. SAFE_MODE=1 USE_WEBENGINE=0 mcpelauncher-ui-qt");
+#ifdef __APPLE__
+    __ASYNC_SAFE_LOG("2. SAFE_MODE=1 USE_WEBENGINE=0 open -a /Applications/Minecraft\\ Bedrock\\ Launcher.app");
+#else
+    __ASYNC_SAFE_LOG("2. flatpak run --env=SAFE_MODE=1 --env=USE_WEBENGINE=0 io.mrarm.mcpelauncher");
+#endif
+
+    printf("Signal %i received\n", signal);
+
+    struct sigaction act;
+    act.sa_handler = nullptr;
+    sigemptyset(&act.sa_mask);
+    act.sa_flags = 0;
+    sigaction(SIGSEGV, &act, 0);
+    sigaction(SIGABRT, &act, 0);
+    sigaction(SIGFPE, &act, 0);
+    sigaction(SIGBUS, &act, 0);
+    sigaction(SIGILL, &act, 0);
+
+    if (hasCrashed)
+        return;
+    hasCrashed = true;
+
+    // Workaround against application freeze while dumping stacktrace
+    // stop app from bouncing more than one sec. on crash macOS x86_64
+    std::thread([signal](){
+        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+        printf("Backtrace or dumping stack hung up, aborting\n");
+        printf("Signal Number %d\n", signal);
+        fflush(stdout);
+        if(getenv("SAFE_MODE") == nullptr) {
+            putenv("USE_WEBENGINE=0");
+            putenv("SAFE_MODE=1");
+            execv(argv[0], argv);
+        }
+        _Exit(signal);
+    }).detach();
+
+    void** ptr = &aptr;
+    void *array[25];
+    int count = backtrace(array, 25);
+    char **symbols = backtrace_symbols(array, count);
+    char *nameBuf = (char*) malloc(256);
+    size_t nameBufLen = 256;
+    printf("Backtrace elements: %i\n", count);
+    for (int i = 0; i < count; i++) {
+        if (symbols[i] == nullptr) {
+            printf("# %i unk [%4p]\n", i, array[i]);
+            continue;
+        }
+        if (symbols[i][0] == '[') { // unknown symbol
+            Dl_info symInfo;
+            if (dladdr(array[i], &symInfo)) {
+                int status = 0;
+                nameBuf = abi::__cxa_demangle(symInfo.dli_sname, nameBuf, &nameBufLen, &status);
+                printf("\\# %i NATIVE %s+%p in %s+0x%4p [0x%4p]\n", i, nameBuf, (void *) ((size_t) array[i] - (size_t) symInfo.dli_saddr), symInfo.dli_fname, (void *) ((size_t) array[i] - (size_t) symInfo.dli_fbase), array[i]);
+                continue;
+            }
+        }
+        printf("# %i %s\n", i, symbols[i]);
+    }
+    printf("Dumping stack...\n");
+    for (int i = 0; i < 1000; i++) {
+        void* pptr = *ptr;
+        Dl_info symInfo;
+        if (pptr && dladdr(pptr, &symInfo)) {
+            int status = 0;
+            nameBuf = abi::__cxa_demangle(symInfo.dli_sname, nameBuf, &nameBufLen, &status);
+            printf("\\# %i NATIVE %s+%p in %s+%4p [%4p]\n", i, nameBuf, (void *) ((size_t) pptr - (size_t) symInfo.dli_saddr), symInfo.dli_fname, (void *) ((size_t) pptr - (size_t) symInfo.dli_fbase), pptr);
+        }
+        ptr++;
+    }
+    printf("program failed with unix signal number: %d\n", signal);
+    fflush(stdout);
+    if(getenv("SAFE_MODE") == nullptr) {
+        putenv("USE_WEBENGINE=0");
+        putenv("SAFE_MODE=1");
+        execv(argv[0], argv);
+    }
+    _exit(signal);
+}
+
+void CrashHandler::registerCrashHandler(int argc, char**argv) {
+    printf("SAFE_MODE before exec: %s\n", getenv("SAFE_MODE"));
+    CrashHandler::argc = argc;
+    CrashHandler::argv = argv;
+
+    struct sigaction act;
+    sigemptyset(&act.sa_mask);
+    act.sa_handler = (void (*)(int)) handleSignal;
+    act.sa_flags = 0;
+    sigaction(SIGSEGV, &act, 0);
+    sigaction(SIGABRT, &act, 0);
+    sigaction(SIGFPE, &act, 0);
+    sigaction(SIGBUS, &act, 0);
+    sigaction(SIGILL, &act, 0);
+}

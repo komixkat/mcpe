@@ -2,10 +2,10 @@
 # The launcher code, the updates mod, and the patches all come from GitHub.
 
 pkgname=mcpelauncher-linux-git
-pkgver=1.7.6.r2.gd9cd7f9
+pkgver=1.7.6
 pkgrel=1
 pkgdesc="Minecraft: Pocket Edition launcher for Linux"
-arch=('x86_64' 'i686')
+arch=('x86_64')
 url="https://github.com/komixkat/mcpe"
 license=('GPL-3.0-only' 'custom')
 makedepends=('git' 'cmake' 'clang' 'make')
@@ -16,11 +16,11 @@ conflicts=('mcpelauncher-client' 'mcpelauncher-linux')
 
 pkgver() {
   cd mcpe
-  git describe --long --tags | sed 's/^v//; s/\([^-]*-g\)/r\1/; s/-/./g'
+  git describe --long --tags 2>/dev/null | sed 's/^v//; s/\([^-]*-g\)/r\1/; s/-/./g' || echo "$pkgver"
 }
 
 source=(
-  "git+https://github.com/komixkat/mcpe.git#branch=qt6-fixed"
+  "git+https://github.com/komixkat/mcpe.git#branch=qt6"
 )
 md5sums=('SKIP')
 

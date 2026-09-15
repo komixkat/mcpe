@@ -1,0 +1,74 @@
+name: build
+
+on:
+  push:
+    branches: [qt6]
+  workflow_dispatch: {}
+  schedule:
+    - cron: "0 4 * * 1"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+      - name: Install build dependencies
+        run: |
+          pacman -Syu --noconfirm --disable-download-timeout
+          pacman -S --noconfirm --needed \
+            base-devel git sudo cmake make clang \
+            curl zlib libpng libevdev systemd libxi libegl libuv \
+            qt6-base qt6-declarative qt6-webengine qt6-webchannel \
+            qt6-tools qt6-svg vulkan-headers libxinerama libzip protobuf \
+            openssl hicolor-icon-theme desktop-file-utils ninja github-cli
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: qt6
+
+      - name: Build mcpelauncher-linux
+        working-directory: packaging/core
+        run: |
+          useradd -m builder
+          chown -R builder:builder /__w
+          su builder -c "makepkg -f --noconfirm"
+
+      - name: Build mcpelauncher-ui
+        working-directory: packaging/ui
+        run: |
+          chown -R builder:builder /__w
+          su builder -c "makepkg -f --noconfirm"
+
+      - name: Upload packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: packages
+          path: |
+            packaging/core/*.pkg.tar.zst
+            packaging/ui/*.pkg.tar.zst
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          dist="$GITHUB_WORKSPACE/dist"
+          mkdir -p "$dist"
+          cp "$GITHUB_WORKSPACE"/packaging/core/*.pkg.tar.zst "$dist/"
+          cp "$GITHUB_WORKSPACE"/packaging/ui/*.pkg.tar.zst "$dist/"
+          sha256sum "$dist"/*.pkg.tar.zst > "$dist/SHA256SUMS.txt"
+          gh release delete latest --repo komixkat/mcpe --yes --cleanup-tag 2>/dev/null || true
+          gh release create latest "$dist"/* \
+            --repo komixkat/mcpe \
+            --title "mcpelauncher (latest build)" \
+            --notes "Automated build of the fixed qt6 launcher.
+
+Install with:
+
+\`\`\`bash
+curl -sL https://raw.githubusercontent.com/komixkat/mcpe/qt6/install.sh | bash
+\`\`\`"
