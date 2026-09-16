@@ -7,7 +7,7 @@ on:
 
 permissions:
   contents: write
-  pull-requests: write
+  issues: write
 
 jobs:
   sync:
@@ -19,8 +19,8 @@ jobs:
           fetch-depth: 0
           ref: qt6
 
-      - name: Query upstream state
-        id: upstream
+      - name: Query upstream launcher pins
+        id: launcher
         run: |
           MANIFEST_HEAD=$(curl -s "https://api.github.com/repos/minecraft-linux/mcpelauncher-manifest/commits/qt6" | grep -m1 '"sha"' | sed 's/.*"sha": "//;s/".*//')
           CLIENT_PIN=$(curl -s "https://api.github.com/repos/minecraft-linux/mcpelauncher-manifest/git/trees/qt6?recursive=1" | python3 -c "
@@ -38,47 +38,90 @@ jobs:
           echo "NEW_MANIFEST=$MANIFEST_HEAD" >> "$GITHUB_ENV"
           echo "NEW_CLIENT=$CLIENT_PIN" >> "$GITHUB_ENV"
           echo "NEW_CORE=$CORE_PIN" >> "$GITHUB_ENV"
-          echo "manifest=$MANIFEST_HEAD client=$CLIENT_PIN core=$CORE_PIN"
+          echo "Upstream launcher: manifest=$MANIFEST_HEAD client=$CLIENT_PIN core=$CORE_PIN"
 
-      - name: Compare with recorded state
-        id: compare
+      - name: Check if launcher source moved
+        id: launcher-diff
         run: |
           OLD=$(grep UPSTREAM_MANIFEST_HEAD packaging/upstream.state | cut -d= -f2)
           OLD_CLIENT=$(grep UPSTREAM_CLIENT_PIN packaging/upstream.state | cut -d= -f2)
           OLD_CORE=$(grep UPSTREAM_CORE_PIN packaging/upstream.state | cut -d= -f2)
-          echo "OLD_MANIFEST=$OLD" >> "$GITHUB_ENV"
-          echo "OLD_CLIENT=$OLD_CLIENT" >> "$GITHUB_ENV"
-          echo "OLD_CORE=$OLD_CORE" >> "$GITHUB_ENV"
           echo "old: manifest=$OLD client=$OLD_CLIENT core=$OLD_CORE"
           echo "new: manifest=$NEW_MANIFEST client=$NEW_CLIENT core=$NEW_CORE"
           if [ "$OLD" = "$NEW_MANIFEST" ] && [ "$OLD_CLIENT" = "$NEW_CLIENT" ] && [ "$OLD_CORE" = "$NEW_CORE" ]; then
-            echo "NEEDS_SYNC=false" >> "$GITHUB_ENV"
-            echo "No upstream change."
+            echo "LAUNCHER_MOVED=false" >> "$GITHUB_ENV"
+            echo "Launcher source unchanged."
           else
-            echo "NEEDS_SYNC=true" >> "$GITHUB_ENV"
-            echo "Upstream moved, opening sync PR."
+            echo "LAUNCHER_MOVED=true" >> "$GITHUB_ENV"
+            echo "Launcher source moved upstream."
           fi
 
-      - name: Open sync PR
-        if: env.NEEDS_SYNC == 'true'
+      - name: Check for open launcher-drift issue
+        id: drift-issue
+        run: |
+          TITLE="Upstream launcher moved to $NEW_MANIFEST"
+          NUMBER=$(gh issue list --repo komixkat/mcpe --state open --search "\"$TITLE\" in:title" --json number -q '.[0].number' 2>/dev/null)
+          echo "DRIFT_ISSUE=$NUMBER" >> "$GITHUB_ENV"
+          if [ -n "$NUMBER" ]; then
+            echo "Drift issue already open: #$NUMBER"
+          else
+            echo "No drift issue yet."
+          fi
+
+      - name: Open launcher-drift issue (no PR, no approval needed)
+        if: env.LAUNCHER_MOVED == 'true' && env.DRIFT_ISSUE == ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          sed -i \
-            -e "s|^UPSTREAM_MANIFEST_HEAD=.*|UPSTREAM_MANIFEST_HEAD=$NEW_MANIFEST|" \
-            -e "s|^UPSTREAM_CLIENT_PIN=.*|UPSTREAM_CLIENT_PIN=$NEW_CLIENT|" \
-            -e "s|^UPSTREAM_CORE_PIN=.*|UPSTREAM_CORE_PIN=$NEW_CORE|" \
-            packaging/upstream.state
+          OLD_MANIFEST=$(grep UPSTREAM_MANIFEST_HEAD packaging/upstream.state | cut -d= -f2)
+          OLD_CLIENT=$(grep UPSTREAM_CLIENT_PIN packaging/upstream.state | cut -d= -f2)
+          OLD_CORE=$(grep UPSTREAM_CORE_PIN packaging/upstream.state | cut -d= -f2)
+          printf 'The upstream launcher moved while this repo pins the vendored sources it was verified against.\n\n- recorded manifest qt6: **%s**\n- new manifest qt6: **%s**\n- recorded client: %s\n- new client: %s\n- recorded core: %s\n- new core: %s\n\nThe launcher core and UI in this repo are a frozen, verified snapshot. Game version support is handled by the **updates mod** (auto-synced separately), so the launcher source does not need to move for new game versions. This issue is informational; refresh the vendored sources only if a launcher feature or crash fix is required.\n' \
+            "$OLD_MANIFEST" "$NEW_MANIFEST" "$OLD_CLIENT" "$NEW_CLIENT" "$OLD_CORE" "$NEW_CORE" > body.md
+          gh issue create "--title=Upstream launcher moved to $NEW_MANIFEST" --body-file body.md --repo komixkat/mcpe
+
+      - name: Query latest updates mod release
+        id: mod
+        run: |
+          MOD_TAG=$(curl -s "https://api.github.com/repos/minecraft-linux/mcpelauncher-updates/releases/latest" | grep -m1 '"tag_name"' | sed 's/.*"tag_name": "//;s/".*//')
+          echo "MOD_TAG=$MOD_TAG" >> "$GITHUB_ENV"
+          echo "Latest updates mod release: $MOD_TAG"
+
+      - name: Check if the mod shipped in the repo is current
+        id: mod-diff
+        run: |
+          CURRENT=$(grep MOD_VERSION packaging/upstream.state | cut -d= -f2)
+          echo "CURRENT_MOD=$CURRENT" >> "$GITHUB_ENV"
+          echo "repo ships: $CURRENT ; latest upstream: $MOD_TAG"
+          if [ "$CURRENT" = "$MOD_TAG" ]; then
+            echo "MOD_STALE=false" >> "$GITHUB_ENV"
+            echo "Updates mod is current, no change needed."
+          else
+            echo "MOD_STALE=true" >> "$GITHUB_ENV"
+            echo "Updates mod needs refresh."
+          fi
+
+      - name: Fetch newer updates mod release
+        if: env.MOD_STALE == 'true'
+        run: |
+          mkdir -p /tmp/mod
+          curl -sL -o /tmp/mod/mod.zip "https://github.com/minecraft-linux/mcpelauncher-updates/releases/download/$MOD_TAG/mcpelauncher-updates-x86_64-release.zip"
+          cd /tmp/mod
+          unzip -o -q mod.zip
+          ls -la libmcpelauncher-updates.so patches/libPlayFabMultiplayer.so
+          file libmcpelauncher-updates.so
+
+      - name: Swap in the new mod and push
+        if: env.MOD_STALE == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cp /tmp/mod/libmcpelauncher-updates.so mods/libmcpelauncher-updates.so
+          cp /tmp/mod/patches/libPlayFabMultiplayer.so mods/patches/libPlayFabMultiplayer.so
+          sed -i -e "s|^MOD_VERSION=.*|MOD_VERSION=$MOD_TAG|" packaging/upstream.state
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          BRANCH="sync/upstream-$NEW_MANIFEST"
-          git fetch origin "$BRANCH" 2>/dev/null && git push origin --delete "$BRANCH"
-          git checkout -b "$BRANCH"
-          git add packaging/upstream.state
-          git commit -m "sync: record upstream qt6 $NEW_MANIFEST"
-          git push origin "$BRANCH"
-          printf 'The upstream launcher moved.\n\n- manifest qt6: **%s**\n- mcpelauncher-client: **%s**\n- mcpelauncher-core: **%s**\n\nThe vendored sources and fixes in this repo still target the old state:\n- %s\n- %s\n- %s\n\nReview what changed upstream and refresh the vendored directories and packaging/fixes patches. The build workflow does not run until this PR is merged.\n' \
-            "$NEW_MANIFEST" "$NEW_CLIENT" "$NEW_CORE" "$OLD_MANIFEST" "$OLD_CLIENT" "$OLD_CORE" > body.md
-          gh pr create "--title=Upstream qt6 changed to $NEW_MANIFEST" \
-            --body-file body.md \
-            --base qt6 --head "$BRANCH" || true
+          git add mods/libmcpelauncher-updates.so mods/patches/libPlayFabMultiplayer.so packaging/upstream.state
+          git commit -m "mod: bump updates mod to $MOD_TAG"
+          git push origin qt6
+          echo "New updates mod pushed. The build workflow will automatically rebuild and publish a new release."
