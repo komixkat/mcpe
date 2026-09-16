@@ -33,6 +33,19 @@ for url in $URLS; do
 done
 
 PGKS=(*.pkg.tar.zst)
+
+# Packages renamed to a -mcpe suffix so AUR helpers stop offering "updates".
+# Pre-remove any old-named packages still installed, otherwise pacman hits an
+# unresolvable conflict (it prompts [y/N] to remove them, and --noconfirm
+# answers no, which aborts the transaction).
+REMOVE=()
+pacman -Qq mcpelauncher-linux-git >/dev/null 2>&1 && REMOVE+=(mcpelauncher-linux-git)
+pacman -Qq mcpelauncher-ui >/dev/null 2>&1 && REMOVE+=(mcpelauncher-ui)
+if [[ ${#REMOVE[@]} -gt 0 ]]; then
+  echo "Removing old-named packages before installing: ${REMOVE[*]}"
+  sudo pacman -R --noconfirm "${REMOVE[@]}"
+fi
+
 echo "Installing: ${PGKS[*]}"
 # Run pacman with --noconfirm so it never reads from stdin.
 # When this script is piped (curl ... | bash), any child that reads stdin
