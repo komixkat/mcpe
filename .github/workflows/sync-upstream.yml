@@ -59,8 +59,8 @@ jobs:
       - name: Check for open launcher-drift issue
         id: drift-issue
         run: |
-          TITLE="Upstream launcher moved to $NEW_MANIFEST"
-          NUMBER=$(gh issue list --repo komixkat/mcpe --state open --search "\"$TITLE\" in:title" --json number -q '.[0].number' 2>/dev/null)
+          NUMBER=$(gh issue list --repo komixkat/mcpe --state open --limit 100 --json 'number,title' | \
+            grep "\"Upstream launcher moved to $NEW_MANIFEST\"" | head -1 | grep -o '[0-9]*' | head -1)
           echo "DRIFT_ISSUE=$NUMBER" >> "$GITHUB_ENV"
           if [ -n "$NUMBER" ]; then
             echo "Drift issue already open: #$NUMBER"
