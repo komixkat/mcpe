@@ -1,7 +1,7 @@
 # Arch Linux package for the MCPE launcher UI, built from the vendored
 # mcpelauncher-ui-manifest sources in this repository (ui/ directory).
 
-pkgname=mcpelauncher-ui
+pkgname=mcpelauncher-ui-mcpe
 pkgver=1.7.6
 pkgrel=1
 pkgdesc="Minecraft: PE Linux launcher UI"
@@ -10,10 +10,11 @@ url="https://github.com/komixkat/mcpe"
 license=('GPL-3.0-only' 'MIT')
 options=('!debug')
 makedepends=('git' 'cmake' 'ninja' 'qt6-tools' 'vulkan-headers' 'qt6-svg' 'libxinerama')
-depends=('qt6-base' 'qt6-webengine' 'qt6-declarative' 'libzip' 'protobuf' 'mcpelauncher-linux' 'zlib' 'curl' 'glibc' 'qt6-webchannel' 'openssl' 'hicolor-icon-theme' 'desktop-file-utils')
+depends=('qt6-base' 'qt6-webengine' 'qt6-declarative' 'libzip' 'protobuf' 'mcpelauncher-linux-mcpe' 'zlib' 'curl' 'glibc' 'qt6-webchannel' 'openssl' 'hicolor-icon-theme' 'desktop-file-utils')
 optdepends=('mcpelauncher-msa-ui-qt: Microsoft authentication for version before 1.16.1X')
-provides=('mcpelauncher-ui-qt')
-conflicts=('mcpelauncher-ui-qt')
+replaces=('mcpelauncher-ui')
+provides=('mcpelauncher-ui' 'mcpelauncher-ui-qt')
+conflicts=('mcpelauncher-ui' 'mcpelauncher-ui-qt')
 
 source=(
   "git+https://github.com/komixkat/mcpe.git#branch=qt6"

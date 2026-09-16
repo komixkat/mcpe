@@ -1,7 +1,7 @@
 # Arch Linux package for MCPE launcher, built from source in this repo.
 # The launcher code, the updates mod, and the patches all come from GitHub.
 
-pkgname=mcpelauncher-linux-git
+pkgname=mcpelauncher-linux-mcpe
 pkgver=1.7.6
 pkgrel=1
 pkgdesc="Minecraft: Pocket Edition launcher for Linux"
@@ -11,9 +11,10 @@ license=('GPL-3.0-only' 'custom')
 options=('!debug')
 makedepends=('git' 'cmake' 'clang' 'make')
 depends=('curl' 'libx11' 'zlib' 'libpng' 'libevdev' 'systemd' 'libxi' 'libegl' 'qt6-base' 'qt6-declarative' 'qt6-webengine' 'libuv')
-optdepends=('mcpelauncher-ui: GUI for Launcher')
-provides=('mcpelauncher-client' 'mcpelauncher-linux')
-conflicts=('mcpelauncher-client' 'mcpelauncher-linux')
+optdepends=('mcpelauncher-ui-mcpe: GUI for Launcher')
+replaces=('mcpelauncher-linux' 'mcpelauncher-linux-git')
+provides=('mcpelauncher-client' 'mcpelauncher-linux' 'mcpelauncher-linux-git')
+conflicts=('mcpelauncher-client' 'mcpelauncher-linux' 'mcpelauncher-linux-git')
 
 pkgver() {
   cd mcpe

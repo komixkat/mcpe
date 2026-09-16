@@ -12,9 +12,9 @@ the runtime mod, the Arch build files, and the auto-build workflow.
 curl -sL https://raw.githubusercontent.com/komixkat/mcpe/qt6/install.sh | bash
 ```
 
-This downloads the latest built `mcpelauncher-linux` and `mcpelauncher-ui`
-packages from the GitHub Releases of this repository and installs them with
-pacman. No AUR, no compilation on your machine.
+This downloads the latest built `mcpelauncher-linux-mcpe` and
+`mcpelauncher-ui-mcpe` packages from the GitHub Releases of this repository
+and installs them with pacman. No AUR, no compilation on your machine.
 
 Binaries are rebuilt and published automatically on a weekly schedule (and
 on every push to the `qt6` branch) by the `build` workflow in
@@ -40,15 +40,15 @@ cmake --build build-ui --parallel
 
 ## Arch packages
 
-- `packaging/core/PKGBUILD` builds `mcpelauncher-linux` (the launcher core from
-  this repo, with the fixes and the updates mod).
-- `packaging/ui/PKGBUILD` builds `mcpelauncher-ui` (the Qt login/version UI,
-  built from the vendored `ui/` directory).
+- `packaging/core/PKGBUILD` builds `mcpelauncher-linux-mcpe` (the launcher
+  core from this repo, with the fixes and the updates mod).
+- `packaging/ui/PKGBUILD` builds `mcpelauncher-ui-mcpe` (the Qt login/version
+  UI, built from the vendored `ui/` directory).
 
 ```bash
 cd packaging/core && makepkg -f
 cd ../ui && makepkg -f
-sudo pacman -U mcpelauncher-linux-git-*.pkg.tar.zst mcpelauncher-ui-*.pkg.tar.zst
+sudo pacman -U mcpelauncher-linux-mcpe-*.pkg.tar.zst mcpelauncher-ui-mcpe-*.pkg.tar.zst
 ```
 
 ## Run
@@ -89,6 +89,24 @@ and rebuilt.
 - `install.sh`: the one-command installer.
 - `.github/workflows/`: `build.yml` (compiles and publishes packages) and
   `sync-upstream.yml` (tracks upstream).
+
+## Credits
+
+This repository is a derivative fork of the Minecraft: Bedrock Edition launcher
+for Linux originally created by MCMrARM and maintained by the
+[`minecraft-linux`](https://github.com/minecraft-linux) community.
+
+Upstream sources used here, all GPL-3.0:
+
+- [`minecraft-linux/mcpelauncher-manifest`](https://github.com/minecraft-linux/mcpelauncher-manifest)
+  (main repo, launcher core and client)
+- [`minecraft-linux/mcpelauncher-ui-qt`](https://github.com/minecraft-linux/mcpelauncher-ui-qt)
+  and `mcpelauncher-ui-manifest` (Qt UI, vendored into `ui/`)
+- The PairIP / PlayFab runtime patches bundled under `mods/`
+
+Thanks to MCMrARM, ChristopherHX, GameParrot, reedacartwright, and all other
+upstream contributors. This project ships their code with the fixes needed to
+run recent game versions; all modifications remain under GPL-3.0.
 
 ## License
 
