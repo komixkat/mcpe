@@ -39,8 +39,8 @@ PGKS=(*.pkg.tar.zst)
 # unresolvable conflict (it prompts [y/N] to remove them, and --noconfirm
 # answers no, which aborts the transaction).
 REMOVE=()
-pacman -Qq mcpelauncher-linux-git >/dev/null 2>&1 && REMOVE+=(mcpelauncher-linux-git)
-pacman -Qq mcpelauncher-ui >/dev/null 2>&1 && REMOVE+=(mcpelauncher-ui)
+if pacman -Qq | grep -qx 'mcpelauncher-linux-git'; then REMOVE+=(mcpelauncher-linux-git); fi
+if pacman -Qq | grep -qx 'mcpelauncher-ui'; then REMOVE+=(mcpelauncher-ui); fi
 if [[ ${#REMOVE[@]} -gt 0 ]]; then
   echo "Removing old-named packages before installing: ${REMOVE[*]}"
   sudo pacman -R --noconfirm "${REMOVE[@]}"
