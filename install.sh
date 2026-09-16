@@ -34,7 +34,15 @@ done
 
 PGKS=(*.pkg.tar.zst)
 echo "Installing: ${PGKS[*]}"
-sudo pacman -U --needed "${PGKS[@]}"
+# Guard against the "curl | bash" stdin trap: a child like sudo/pacman will
+# consume the remaining script bytes from the pipe and silently truncate the
+# install (the mod deploy below never ran for users who piped this script).
+# When stdin is a pipe, redirect pacman's prompt to the controlling tty.
+if [ -p /dev/stdin ]; then
+  sudo pacman -U --needed "${PGKS[@]}" < /dev/tty
+else
+  sudo pacman -U --needed "${PGKS[@]}"
+fi
 
 echo "Deploying the updates mod..."
 MODDIR="$HOME/.local/share/mcpelauncher/mods"
@@ -44,6 +52,15 @@ curl -fsSL -o "$MODDIR/libmcpelauncher-updates.so" "$base/libmcpelauncher-update
 curl -fsSL -o "$MODDIR/patches/libPlayFabMultiplayer.so" "$base/patches/libPlayFabMultiplayer.so"
 curl -fsSL -o "$MODDIR/patches/v1.26.0.2/x86_64/libmaesdk.so" "$base/patches/v1.26.0.2/x86_64/libmaesdk.so"
 chmod +x "$MODDIR/libmcpelauncher-updates.so"
+
+echo "Verifying mod deployment..."
+if [ -s "$MODDIR/libmcpelauncher-updates.so" ] && [ -s "$MODDIR/patches/libPlayFabMultiplayer.so" ] && [ -s "$MODDIR/patches/v1.26.0.2/x86_64/libmaesdk.so" ]; then
+  echo "  OK: updates mod -> $MODDIR"
+  find "$MODDIR" -type f -printf "      %p (%s bytes)\n"
+else
+  echo "  FAILED: mod files missing from $MODDIR" >&2
+  exit 1
+fi
 
 echo
 echo "Done. Launch the launcher from the application menu (mcpelauncher-ui-qt) or run: mcpelauncher-ui-qt"
