@@ -17,7 +17,7 @@ conflicts=('mcpelauncher-client' 'mcpelauncher-linux')
 
 pkgver() {
   cd mcpe
-  git describe --long --tags 2>/dev/null | sed 's/^v//; s/\([^-]*-g\)/r\1/; s/-/./g' || echo "$pkgver"
+  git describe --long --tags --match 'v*' 2>/dev/null | sed 's/^v//; s/\([^-]*-g\)/r\1/; s/-/./g' || echo "$pkgver"
 }
 
 source=(
