@@ -34,15 +34,14 @@ done
 
 PGKS=(*.pkg.tar.zst)
 echo "Installing: ${PGKS[*]}"
-# Guard against the "curl | bash" stdin trap: a child like sudo/pacman will
-# consume the remaining script bytes from the pipe and silently truncate the
-# install (the mod deploy below never ran for users who piped this script).
-# When stdin is a pipe, redirect pacman's prompt to the controlling tty.
-if [ -p /dev/stdin ]; then
-  sudo pacman -U --needed "${PGKS[@]}" < /dev/tty
-else
-  sudo pacman -U --needed "${PGKS[@]}"
-fi
+# Run pacman with --noconfirm so it never reads from stdin.
+# When this script is piped (curl ... | bash), any child that reads stdin
+# would consume the remaining script bytes from the same pipe and silently
+# truncate the install after this step (the mod deploy below). Directing
+# sudo's prompt also breaks sudo on real terminals, so --noconfirm is the
+# clean fix: no child touches stdin at all, and sudo reads the password
+# from the controlling tty as normal.
+sudo pacman -U --needed --noconfirm "${PGKS[@]}"
 
 echo "Deploying the updates mod..."
 MODDIR="$HOME/.local/share/mcpelauncher/mods"
