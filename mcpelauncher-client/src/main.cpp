@@ -42,6 +42,7 @@
 #include "core_patches.h"
 #include "pairip_plt_workaround.h"
 #include "thread_mover.h"
+#include "vibrant_visuals_patch.h"
 #include <FileUtil.h>
 #include <properties/property.h>
 #include <fstream>
@@ -480,6 +481,10 @@ Hardware	: Qualcomm Technologies, Inc MSM8998
         gladLoadGLES2Loader(fake_egl::eglGetProcAddress);
 #endif
         MinecraftUtils::setupGLES2Symbols(fake_egl::eglGetProcAddress);
+        // Vibrant Visuals is gated on the device tier list in the game assets.
+        // Whitelist this GPU while a GL context is available and before the
+        // game gets a chance to read the list.
+        VibrantVisualsPatch::apply();
     } else {
         // The glcore patch requires an empty library
         // Otherwise linker has to hide the symbols from dlsym in libminecraftpe.so
@@ -770,6 +775,11 @@ Hardware	: Qualcomm Technologies, Inc MSM8998
             }
         }
     }
+
+    // Whitelist the GPU we are running on in the game's device tier list so
+    // "Vibrant Visuals" can be selected. Desktop GPUs are not part of the
+    // Android device list, so the game greys the option out otherwise.
+    VibrantVisualsPatch::apply();
 
     Log::info("Launcher", "Executing main thread");
     ThreadMover::executeMainThread();
