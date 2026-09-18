@@ -823,6 +823,13 @@ void readOptions() {
 
     properties::property<bool> fullKeyboard(properties, "ctrl_fullkeyboardgameplay", false);
 
+    // Bedrock refuses to apply skins that are not from the Marketplace while
+    // "Only Allow Trusted Skins" is enabled, which makes custom skin packs
+    // (including the one this project ships) fall back to the default skin.
+    // Force it off so custom skins actually load, including after a game
+    // update rewrites options.txt. Default true so a missing key is also fixed.
+    properties::property<bool> trustedSkins(properties, "only_show_trusted_skins", true);
+
     parseOptions(properties);
 
     if(leftKey > 512 || downKey > 512 || rightKey > 512 || upKey > 512 || leftKeyFullKeyboard > 512 || downKeyFullKeyboard > 512 || rightKeyFullKeyboard > 512 || upKeyFullKeyboard > 512) {
@@ -836,6 +843,12 @@ void readOptions() {
         upKey.set('W');
         upKeyFullKeyboard.set('W');
         saveOptions(properties);
+    }
+
+    if(trustedSkins) {
+        trustedSkins.set(false);
+        saveOptions(properties);
+        Log::info("SkinFix", "Disabled 'Only Allow Trusted Skins' so custom skin packs load");
     }
 
     GameOptions::leftKey = leftKey;

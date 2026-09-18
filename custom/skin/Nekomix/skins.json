@@ -1,0 +1,12 @@
+{
+  "skins": [
+    {
+      "localization_name": "Nekomix",
+      "geometry": "geometry.humanoid.custom",
+      "texture": "nekomix.png",
+      "type": "free"
+    }
+  ],
+  "serialize_name": "Nekomix",
+  "localization_name": "Nekomix"
+}
