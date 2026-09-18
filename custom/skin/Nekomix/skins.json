@@ -2,7 +2,7 @@
   "skins": [
     {
       "localization_name": "Nekomix",
-      "geometry": "geometry.humanoid.custom",
+      "geometry": "geometry.humanoid.customSlim",
       "texture": "nekomix.png",
       "type": "free"
     }

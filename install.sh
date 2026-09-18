@@ -158,6 +158,22 @@ else
   echo "        skins on at first launch, so no action is needed."
 fi
 
+# ---------------------------------------------------------------------------
+# Ensure Bedrock's pack-state files exist. If these are missing, the game
+# treats them as a failed resource-load every session and shows the
+# "Global Resources Reset - Resources failed to load previously" dialog at
+# every launch. They must be valid JSON arrays; only create when absent so a
+# user's real pack selection is never overwritten.
+# ---------------------------------------------------------------------------
+PACKDIR="$DATA_DIR/games/com.mojang"
+for PKG in global_resource_packs.json resource_packs.json known_resource_packs.json; do
+  if [ ! -f "$PACKDIR/$PKG" ]; then
+    printf '[]\n' > "$PACKDIR/$PKG"
+    echo "  OK: created $PKG (empty pack list)"
+  fi
+done
+unset PACKDIR PKG
+
 echo
 echo "Done."
 echo "  launcher:  mcpelauncher-ui-qt"

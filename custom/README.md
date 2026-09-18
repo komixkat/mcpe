@@ -84,7 +84,15 @@ publishes new bundles automatically.
 
 ## Skin pack
 
-`skin/Nekomix/` is a normal Bedrock skin pack. It is installed to
+`skin/Nekomix/` is a normal Bedrock skin pack (slim-arm model,
+`geometry.humanoid.customSlim`). It is installed to
 `games/com.mojang/skin_packs/`. Bedrock only applies skins that are not from
 the Marketplace when **Only Allow Trusted Skins** is off, so both `install.sh`
 and the launcher client force `only_show_trusted_skins=0` in `options.txt`.
+
+`install.sh` also makes sure the pack-state files
+(`global_resource_packs.json`, `resource_packs.json`,
+`known_resource_packs.json`) exist in `games/com.mojang/` as `[]`: when they
+are missing, every session is treated as a failed resource load and the game
+shows the "Global Resources Reset — Resources failed to load previously"
+dialog at every launch.
