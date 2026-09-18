@@ -1,0 +1,130 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 304655b..5fdfc21 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -23,6 +23,7 @@ include(FetchContent)
+ 
+ FetchContent_Declare(libhat
+     GIT_REPOSITORY https://github.com/BasedInc/libhat.git
++    GIT_TAG 69149a1cee5a0228492826bd71af1a32d73ed87e
+     EXCLUDE_FROM_ALL
+ )
+ 
+diff --git a/src/main.cpp b/src/main.cpp
+index a2362db..c2be585 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -32,7 +32,7 @@ bool makeWritable(void* addr) {
+ 
+ #if defined(ARCH_X86_64)
+ constexpr auto NbtTreeFindSignature =
+-"55 48 89 E5 41 57 41 56 41 55 41 54 53 50 4C 8B 6F 08 48 83 C7 08 4D 85 ED 0F 84 ? ? ? ? 4C 8B 3E 4C 8B 66 08 48 89 7D D0 49 89 FE EB 1B 90 C1 F8 1F 0C 01 31 C9 84 C0 0F 9F C1 4D 0F 4E F5 4D 8B 6C CD 00 4D 85 ED 74 41 41 0F B6 45 20 49 8D 75 21 89 C3 D1 EB A8 01 49 0F 45 75 30 49 0F 45 5D 28 49 39 DC 48 89 DA 49 0F 42 D4 4C 89 FF E8 4B 19 D5 01"_sig;
++"55 48 89 E5 41 57 41 56 41 55 41 54 53 50 4C 8B 6F 08 48 83 C7 08 4D 85 ED 0F 84 ? ? ? ? 4C 8B 3E 4C 8B 66 08 48 89 7D D0 49 89 FE EB 1B 90 C1 F8 1F 0C 01 31 C9 84 C0 0F 9F C1 4D 0F 4E F5 4D 8B 6C CD 00 4D 85 ED 74 41 41 0F B6 45 20 49 8D 75 21 89 C3 D1 EB A8 01 49 0F 45 75 30 49 0F 45 5D 28 49 39 DC 48 89 DA 49 0F 42 D4 4C 89 FF E8 ? ? ? ?"_sig;
+ constexpr auto ItemStackBaseLoadItemSignature =
+ "55 48 89 E5 41 57 41 56 41 55 41 54 53 48 81 EC D8 00 00 00 49 89 F7 49 89 FC 64 48 8B 04 25 ? ? ? ? 48 89 45 ? 48 8D 3D"_sig;
+ constexpr auto ItemStackBaseGetDamageValueSignature =
+@@ -80,6 +80,11 @@ extern "C" [[gnu::visibility("default")]] void mod_init()
+     };
+     dl_iterate_phdr([](dl_phdr_info *info, size_t, void *data) { return (*static_cast<decltype(callback) *>(data))(*info); }, &callback);
+ 
++    if (range1.empty() || range2.empty()) {
++        printf("[SP] libminecraftpe text/data ranges not found; preview disabled\n");
++        return;
++    }
++
+     auto scan = [range1](const auto&... sig) {
+         void* addr;
+         ((addr = hat::find_pattern(range1, sig, hat::scan_alignment::X16).get()) || ...);
+@@ -87,8 +92,6 @@ extern "C" [[gnu::visibility("default")]] void mod_init()
+     };
+ 
+     SP_loadConfig();
+-    SP_initModMenu();
+-    SP_register_keybinds();
+ 
+ #define FIND(sig) hat::find_pattern(range1, sig, Align).get()
+ 
+@@ -100,22 +103,69 @@ extern "C" [[gnu::visibility("default")]] void mod_init()
+     ItemStackBase_ctor = (ItemStackBase_ctor_t)FIND(ItemStackBaseCtorSignature);
+ 
+ #undef FIND
++
++    // A game update can invalidate any of the byte signatures above. None of
++    // these are safe to call as null, so refuse to hook and leave the game
++    // untouched instead of crashing later.
++    if (!Nbt_treeFind || !ItemStackBase_loadItem || !ItemStackBase_getDamageValue ||
++        !BaseActorRenderContext_ctor || !ItemRenderer_renderGuiItemNew || !ItemStackBase_ctor) {
++        printf("[SP] one or more function signatures did not match; preview disabled\n");
++        return;
++    }
++
+     //vtable hooks
+-    auto ZTS = hat::find_pattern(range1, hat::object_to_signature("19ShulkerBoxBlockItem")).get();
+-    auto ZTI = hat::find_pattern(range2, hat::object_to_signature(ZTS)).get() - sizeof(void*);
+-    auto ZTV = hat::find_pattern(range2, hat::object_to_signature(ZTI)).get() + sizeof(void*);
++    auto ZTS_res = hat::find_pattern(range1, hat::object_to_signature("19ShulkerBoxBlockItem"));
++    if (!ZTS_res.has_result()) {
++        printf("[SP] ShulkerBoxBlockItem typeinfo not found; preview disabled\n");
++        return;
++    }
++    auto ZTS = ZTS_res.get();
++    auto ZTI_res = hat::find_pattern(range2, hat::object_to_signature(ZTS));
++    if (!ZTI_res.has_result()) {
++        printf("[SP] ShulkerBoxBlockItem typeinfo reference not found; preview disabled\n");
++        return;
++    }
++    auto ZTI = ZTI_res.get() - sizeof(void*);
++    auto ZTV_res = hat::find_pattern(range2, hat::object_to_signature(ZTI));
++    if (!ZTV_res.has_result()) {
++        printf("[SP] ShulkerBoxBlockItem vtable not found; preview disabled\n");
++        return;
++    }
++    auto ZTV = ZTV_res.get() + sizeof(void*);
+     void** vt = (void**)ZTV;
+ 
+-    makeWritable(&vt[55]);
+-    ShulkerBoxBlockItem_appendFormattedHovertext_orig = (Shulker_appendHover_t)vt[55];
+-    vt[55] = (void*)&ShulkerBoxBlockItem_appendFormattedHovertext_hook;
++    if (vt[55] && makeWritable(&vt[55])) {
++        ShulkerBoxBlockItem_appendFormattedHovertext_orig = (Shulker_appendHover_t)vt[55];
++        vt[55] = (void*)&ShulkerBoxBlockItem_appendFormattedHovertext_hook;
++    } else {
++        printf("[SP] ShulkerBoxBlockItem hovertext slot unavailable; hover text hook skipped\n");
++    }
+ 
+-    auto ZTS2 = hat::find_pattern(range1, hat::object_to_signature("17HoverTextRenderer")).get();
+-    auto ZTI2 = hat::find_pattern(range2, hat::object_to_signature(ZTS2)).get() - sizeof(void*);
+-    auto ZTV2 = hat::find_pattern(range2, hat::object_to_signature(ZTI2)).get() + sizeof(void*);
+-    void** vt2 = (void**)ZTV2;
++    auto ZTS2_res = hat::find_pattern(range1, hat::object_to_signature("17HoverTextRenderer"));
++    if (!ZTS2_res.has_result()) {
++        printf("[SP] HoverTextRenderer typeinfo not found; hover box hook skipped\n");
++    } else {
++        auto ZTS2 = ZTS2_res.get();
++        auto ZTI2_res = hat::find_pattern(range2, hat::object_to_signature(ZTS2));
++        if (!ZTI2_res.has_result()) {
++            printf("[SP] HoverTextRenderer typeinfo reference not found; hover box hook skipped\n");
++        } else {
++            auto ZTI2 = ZTI2_res.get() - sizeof(void*);
++            auto ZTV2_res = hat::find_pattern(range2, hat::object_to_signature(ZTI2));
++            if (!ZTV2_res.has_result()) {
++                printf("[SP] HoverTextRenderer vtable not found; hover box hook skipped\n");
++            } else {
++                void** vt2 = (void**)(ZTV2_res.get() + sizeof(void*));
++                if (vt2[17] && makeWritable(&vt2[17])) {
++                    HoverRenderer_renderHoverBox_orig = (RenderHoverBoxFn)vt2[17];
++                    vt2[17] = (void*)&HoverRenderer_renderHoverBox_hook;
++                } else {
++                    printf("[SP] HoverTextRenderer render slot unavailable; hover box hook skipped\n");
++                }
++            }
++        }
++    }
+ 
+-    makeWritable(&vt2[17]);
+-    HoverRenderer_renderHoverBox_orig = (RenderHoverBoxFn)vt2[17];
+-    vt2[17] = (void*)&HoverRenderer_renderHoverBox_hook;
++    SP_initModMenu();
++    SP_register_keybinds();
+ }
+\ No newline at end of file

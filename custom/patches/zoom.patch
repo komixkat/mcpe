@@ -1,0 +1,205 @@
+diff --git a/src/main.cpp b/src/main.cpp
+index 0be17cb..545eaa0 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -1,8 +1,8 @@
+ #include <dlfcn.h>
+ #include <link.h>
+-#include <link.h>
+ #include <span>
+ #include <string>
++#include <cstdio>
+ #include "zoom.h"
+ #include "main.h"
+ #include "conf.h"
+@@ -19,17 +19,38 @@ unsigned long CameraApi_tryGetFOV(void* t) {
+ 
+ extern "C" [[gnu::visibility("default")]] void mod_preinit() {}
+ 
++// Resolve one game-window export. The game-window API is a list of symbols that
++// can grow or change between launcher builds, so a missing symbol must disable
++// the mod cleanly instead of leaving a null pointer that crashes on first use.
++template <typename T>
++static bool resolveGameWindow(void* gw, const char* name, T& target) {
++    target = reinterpret_cast<T>(gw ? dlsym(gw, name) : nullptr);
++    if(!target) {
++        fprintf(stderr, "[Zoom] missing game-window export '%s'; zoom disabled\n", name);
++        return false;
++    }
++    return true;
++}
++
+ extern "C" [[gnu::visibility("default")]] void mod_init() {
+     Conf::load();
+ 
+     auto gw = dlopen("libmcpelauncher_gamewindow.so", 0);
+-    game_window_is_mouse_locked = (decltype(game_window_is_mouse_locked))dlsym(gw, "game_window_is_mouse_locked");
+-    game_window_get_primary_window = (decltype(game_window_get_primary_window))dlsym(gw, "game_window_get_primary_window");
+-    game_window_add_window_creation_callback = (decltype(game_window_add_window_creation_callback))dlsym(gw, "game_window_add_window_creation_callback");
+-    game_window_add_keyboard_callback = (decltype(game_window_add_keyboard_callback))dlsym(gw, "game_window_add_keyboard_callback");
+-    game_window_add_mouse_scroll_callback = (decltype(game_window_add_mouse_scroll_callback))dlsym(gw, "game_window_add_mouse_scroll_callback");
++    if(!resolveGameWindow(gw, "game_window_is_mouse_locked", game_window_is_mouse_locked) ||
++       !resolveGameWindow(gw, "game_window_get_primary_window", game_window_get_primary_window) ||
++       !resolveGameWindow(gw, "game_window_add_window_creation_callback", game_window_add_window_creation_callback) ||
++       !resolveGameWindow(gw, "game_window_add_keyboard_callback", game_window_add_keyboard_callback) ||
++       !resolveGameWindow(gw, "game_window_add_mouse_scroll_callback", game_window_add_mouse_scroll_callback))
++        return;
++    // Optional: older launcher builds do not expose the sensitivity hook.
++    game_window_set_mouse_relative_scale = (decltype(game_window_set_mouse_relative_scale))dlsym(gw, "game_window_set_mouse_relative_scale");
++    fprintf(stderr, "[Zoom] sensitivity-dampening hook: %s\n", game_window_set_mouse_relative_scale ? "available" : "unavailable (older launcher)");
+ 
+     auto mcLib = dlopen("libminecraftpe.so", 0);
++    if(!mcLib) {
++        fprintf(stderr, "[Zoom] libminecraftpe.so is not loaded; zoom disabled\n");
++        return;
++    }
+ 
+     std::span<std::byte> range1, range2;
+ 
+@@ -47,11 +68,41 @@ extern "C" [[gnu::visibility("default")]] void mod_init() {
+         },
+         &callback);
+ 
+-    auto CameraAPI_typeinfo_name = hat::find_pattern(range1, hat::object_to_signature("9CameraAPI")).get();
+-    auto CameraAPI_typeinfo = hat::find_pattern(range2, hat::object_to_signature(CameraAPI_typeinfo_name)).get() - sizeof(void*);
+-    auto CameraAPI_vtable = hat::find_pattern(range2, hat::object_to_signature(CameraAPI_typeinfo)).get() + sizeof(void*);
++    if(range1.empty() || range2.empty()) {
++        fprintf(stderr, "[Zoom] libminecraftpe text/data ranges not found; zoom disabled\n");
++        return;
++    }
++
++    // Resolve the CameraAPI vtable through RTTI. Each step is validated: a game
++    // update that renames or restructures the RTTI must not make us dereference
++    // a garbage pointer.
++    auto CameraAPI_typeinfo_name_res = hat::find_pattern(range1, hat::object_to_signature("9CameraAPI"));
++    if(!CameraAPI_typeinfo_name_res.has_result()) {
++        fprintf(stderr, "[Zoom] CameraAPI typeinfo not found; zoom disabled\n");
++        return;
++    }
++    auto CameraAPI_typeinfo_name = CameraAPI_typeinfo_name_res.get();
++
++    auto CameraAPI_typeinfo_res = hat::find_pattern(range2, hat::object_to_signature(CameraAPI_typeinfo_name));
++    if(!CameraAPI_typeinfo_res.has_result()) {
++        fprintf(stderr, "[Zoom] CameraAPI typeinfo reference not found; zoom disabled\n");
++        return;
++    }
++    auto CameraAPI_typeinfo = CameraAPI_typeinfo_res.get() - sizeof(void*);
++
++    auto CameraAPI_vtable_res = hat::find_pattern(range2, hat::object_to_signature(CameraAPI_typeinfo));
++    if(!CameraAPI_vtable_res.has_result()) {
++        fprintf(stderr, "[Zoom] CameraAPI vtable not found; zoom disabled\n");
++        return;
++    }
++    auto CameraAPI_vtable = CameraAPI_vtable_res.get() + sizeof(void*);
+     auto CameraAPI_tryGetFOV = reinterpret_cast<unsigned long (**)(void*)>(CameraAPI_vtable) + 7;
+ 
++    if(!*CameraAPI_tryGetFOV) {
++        fprintf(stderr, "[Zoom] CameraAPI::tryGetFOV slot is empty; zoom disabled\n");
++        return;
++    }
++
+     CameraAPI_tryGetFOV_orig = *CameraAPI_tryGetFOV;
+ 
+     *CameraAPI_tryGetFOV = [](void* t) -> unsigned long {
+diff --git a/src/main.h b/src/main.h
+index 6c3ee5b..f578f5e 100644
+--- a/src/main.h
++++ b/src/main.h
+@@ -8,4 +8,7 @@ inline void (*game_window_add_keyboard_callback)(void* window, void* user, bool
+ 
+ inline void (*game_window_add_mouse_scroll_callback)(void* window, void* user, bool (*callback)(void* user, double x, double y, double dx, double dy));
+ 
++// Optional: only present on launcher builds that expose it. NULL on older builds.
++inline void (*game_window_set_mouse_relative_scale)(void* window, float scale);
++
+ inline unsigned long (*CameraAPI_tryGetFOV_orig)(void*);
+\ No newline at end of file
+diff --git a/src/zoom.cpp b/src/zoom.cpp
+index 7041cad..6337be0 100644
+--- a/src/zoom.cpp
++++ b/src/zoom.cpp
+@@ -2,21 +2,66 @@
+ #include "main.h"
+ #include "util.h"
+ #include "conf.h"
++#include <cmath>
++#include <cstring>
++#include <cstdint>
++#include <atomic>
++
++// True while the zoom override is active (key held, or the animated
++// transition is still running). Exported so other mods (snaplook) can switch
++// to first-person while zoomed, since Bedrock's third-person boom collapses
++// into the player when the FOV shrinks.
++static std::atomic<bool> zoomActive{false};
++
++extern "C" [[gnu::visibility("default")]] bool mcpelauncher_zoom_active() {
++    return zoomActive.load(std::memory_order_relaxed);
++}
++
++// CameraAPI::tryGetFOV returns a packed value: low 32 bits are the FOV as an
++// IEEE-754 float (radians), high 32 bits are a flag. We only need the float.
++static inline float packedFovToFloat(unsigned long v) {
++    std::uint32_t bits = static_cast<std::uint32_t>(v & 0xffffffffu);
++    float f;
++    std::memcpy(&f, &bits, sizeof(f));
++    return f;
++}
++
++// Dampen look sensitivity by the angular FOV ratio so a zoomed view keeps the
++// same on-screen amount of movement per mouse count. Only applies on launcher
++// builds that expose the hook (NULL on older builds).
++static void applyZoomSensitivity(unsigned long current, unsigned long normal) {
++    if(!game_window_set_mouse_relative_scale)
++        return;
++    float scale = 1.0f;
++    float fz = packedFovToFloat(current);
++    float fn = packedFovToFloat(normal);
++    if(fz > 1e-4f && fn > 1e-4f) {
++        float tz = std::tan(fz * 0.5f);
++        float tn = std::tan(fn * 0.5f);
++        if(tn > 1e-6f)
++            scale = tz / tn;
++    }
++    if(!(scale > 0.0f) || scale > 1.0f)  // only dampen, never amplify; catches NaN
++        scale = 1.0f;
++    game_window_set_mouse_relative_scale(game_window_get_primary_window(), scale);
++}
+ 
+ unsigned long Zoom::CameraAPI_tryGetFOV(void* t) {
+     lastClientZoom = CameraAPI_tryGetFOV_orig(t);
++    unsigned long ret;
+     if(!Conf::animated) {
+-        return zoomKeyDown ? zoomLevel : lastClientZoom;
+-    }
+-    if(transition.inProgress() || zoomKeyDown) {
++        ret = zoomKeyDown ? zoomLevel : lastClientZoom;
++    } else if(transition.inProgress() || zoomKeyDown) {
+         transition.tick();
+         unsigned long current = transition.getCurrent();
+-        if(current == 0) {
+-            return lastClientZoom;
+-        }
+-        return current;
++        ret = (current == 0) ? lastClientZoom : current;
++    } else {
++        ret = lastClientZoom;
+     }
+-    return lastClientZoom;
++    bool active = Conf::animated ? (zoomKeyDown || transition.inProgress()) : zoomKeyDown;
++    zoomActive.store(active, std::memory_order_relaxed);
++    applyZoomSensitivity(ret, lastClientZoom);
++    return ret;
+ }
+ 
+ bool Zoom::onMouseScroll(double dy) {
+@@ -53,6 +98,9 @@ void Zoom::onKeyboard(int keyCode, int action) {
+         case 2:
+             if(zoomKeyDown) {
+                 zoomKeyDown = false;
++                zoomActive.store(false, std::memory_order_relaxed);
++                if(game_window_set_mouse_relative_scale)  // fall back to normal sensitivity immediately
++                    game_window_set_mouse_relative_scale(game_window_get_primary_window(), 1.0f);
+                 if(Conf::animated) {
+                     transition.startTransition(zoomLevel, lastClientZoom, clamp(100, diff / 150000, 250));
+                 }

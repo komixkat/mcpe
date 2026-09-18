@@ -1,0 +1,31 @@
+#pragma once
+
+#include <cstddef>
+#include <cstdint>
+#include "arch.h"
+
+// RE'd renderer entry points and offsets shared by the preview.
+using BaseActorRenderContext_ctor_t = void (*)(void* barc, void* screenContext, void* clientInstance, void* minecraftGame);
+extern BaseActorRenderContext_ctor_t BaseActorRenderContext_ctor;
+
+using ItemRenderer_renderGuiItemNew_t = std::uint64_t (*) (
+    void* rendererCtx,
+    void* barc,
+    void* itemStack,
+    unsigned int aux,
+    unsigned char layer,
+    std::uint64_t flags,
+    RenderVector posX, // this is just incase
+    RenderVector posY,
+    float width,
+    float height,
+    float scale);
+extern ItemRenderer_renderGuiItemNew_t ItemRenderer_renderGuiItemNew;
+
+// 1.26 offsets from RE
+inline constexpr std::size_t BarcStorageSize = 0x400;
+inline constexpr std::size_t BarcItemRendererOffset = 0x58;      // BaseActorRenderContext + 88
+inline constexpr std::size_t ClientMinecraftGameOffset = 0xA8;   // ClientInstance + 168
+inline constexpr std::size_t ClientGetMinecraftGameVfIndex = 83; // vtable slot for getMinecraftGame
+inline constexpr std::size_t ClientGetLocalPlayerVfIndex = 32;
+inline constexpr std::size_t ItemAuxIconValueVfIndex = 120;

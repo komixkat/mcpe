@@ -1,0 +1,187 @@
+diff --git a/src/main.cpp b/src/main.cpp
+index 6d4f6df..0a17fae 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -18,17 +18,31 @@ Snaplook snapLook;
+ extern "C" void __attribute__((visibility("default"))) mod_preinit() {
+ }
+ 
++// Resolve one game-window export. A launcher build that does not provide a
++// symbol must disable the mod cleanly rather than crash on a null call.
++template <typename T>
++static bool resolveGameWindow(void* gw, const char* name, T& target) {
++    target = reinterpret_cast<T>(gw ? dlsym(gw, name) : nullptr);
++    if(!target) {
++        fprintf(stderr, "[Snaplook] missing game-window export '%s'; snaplook disabled\n", name);
++        return false;
++    }
++    return true;
++}
++
+ extern "C" __attribute__((visibility("default"))) void mod_init() {
+     Conf::load();
+     initImgui();
+ 
+     auto gw = dlopen("libmcpelauncher_gamewindow.so", 0);
+-    game_window_is_mouse_locked = (decltype(game_window_is_mouse_locked))dlsym(gw, "game_window_is_mouse_locked");
+-    game_window_get_primary_window = (decltype(game_window_get_primary_window))dlsym(gw, "game_window_get_primary_window");
+-    game_window_add_window_creation_callback = (decltype(game_window_add_window_creation_callback))dlsym(gw, "game_window_add_window_creation_callback");
+-    game_window_add_keyboard_callback = (decltype(game_window_add_keyboard_callback))dlsym(gw, "game_window_add_keyboard_callback");
++    if(!resolveGameWindow(gw, "game_window_is_mouse_locked", game_window_is_mouse_locked) ||
++       !resolveGameWindow(gw, "game_window_get_primary_window", game_window_get_primary_window) ||
++       !resolveGameWindow(gw, "game_window_add_window_creation_callback", game_window_add_window_creation_callback) ||
++       !resolveGameWindow(gw, "game_window_add_keyboard_callback", game_window_add_keyboard_callback))
++        return;
+ 
+     game_window_add_window_creation_callback(NULL, [](void* user) {
++        snaplookResolveZoomLink();
+         game_window_add_keyboard_callback(game_window_get_primary_window(), NULL, [](void* user, int keyCode, int action) -> bool {
+             if(Conf::changingKey) {
+                 if(action == 0) {
+@@ -43,6 +57,10 @@ extern "C" __attribute__((visibility("default"))) void mod_init() {
+     });
+ 
+     auto mcLib = dlopen("libminecraftpe.so", 0);
++    if(!mcLib) {
++        fprintf(stderr, "[Snaplook] libminecraftpe.so is not loaded; snaplook disabled\n");
++        return;
++    }
+ 
+     std::span<std::byte> range1, range2;
+ 
+@@ -60,11 +78,40 @@ extern "C" __attribute__((visibility("default"))) void mod_init() {
+         },
+         &callback);
+ 
+-    auto VanillaCameraAPI_typeinfo_name = hat::find_pattern(range1, hat::object_to_signature("16VanillaCameraAPI")).get();
+-    auto VanillaCameraAPI_typeinfo = hat::find_pattern(range2, hat::object_to_signature(VanillaCameraAPI_typeinfo_name)).get() - sizeof(void*);
+-    auto VanillaCameraAPI_vtable = hat::find_pattern(range2, hat::object_to_signature(VanillaCameraAPI_typeinfo)).get() + sizeof(void*);
++    if(range1.empty() || range2.empty()) {
++        fprintf(stderr, "[Snaplook] libminecraftpe text/data ranges not found; snaplook disabled\n");
++        return;
++    }
++
++    // Resolve the VanillaCameraAPI vtable through RTTI, validating every step so
++    // a future game update cannot turn a signature miss into a crash.
++    auto VanillaCameraAPI_typeinfo_name_res = hat::find_pattern(range1, hat::object_to_signature("16VanillaCameraAPI"));
++    if(!VanillaCameraAPI_typeinfo_name_res.has_result()) {
++        fprintf(stderr, "[Snaplook] VanillaCameraAPI typeinfo not found; snaplook disabled\n");
++        return;
++    }
++    auto VanillaCameraAPI_typeinfo_name = VanillaCameraAPI_typeinfo_name_res.get();
++
++    auto VanillaCameraAPI_typeinfo_res = hat::find_pattern(range2, hat::object_to_signature(VanillaCameraAPI_typeinfo_name));
++    if(!VanillaCameraAPI_typeinfo_res.has_result()) {
++        fprintf(stderr, "[Snaplook] VanillaCameraAPI typeinfo reference not found; snaplook disabled\n");
++        return;
++    }
++    auto VanillaCameraAPI_typeinfo = VanillaCameraAPI_typeinfo_res.get() - sizeof(void*);
++
++    auto VanillaCameraAPI_vtable_res = hat::find_pattern(range2, hat::object_to_signature(VanillaCameraAPI_typeinfo));
++    if(!VanillaCameraAPI_vtable_res.has_result()) {
++        fprintf(stderr, "[Snaplook] VanillaCameraAPI vtable not found; snaplook disabled\n");
++        return;
++    }
++    auto VanillaCameraAPI_vtable = VanillaCameraAPI_vtable_res.get() + sizeof(void*);
+     auto VanillaCameraAPI_getPlayerViewPerspectiveOption = reinterpret_cast<int (**)(void*)>(VanillaCameraAPI_vtable) + 7;
+ 
++    if(!*VanillaCameraAPI_getPlayerViewPerspectiveOption) {
++        fprintf(stderr, "[Snaplook] VanillaCameraAPI perspective slot is empty; snaplook disabled\n");
++        return;
++    }
++
+     VanillaCameraAPI_getPlayerViewPerspectiveOption_orig = *VanillaCameraAPI_getPlayerViewPerspectiveOption;
+ 
+     *VanillaCameraAPI_getPlayerViewPerspectiveOption = [](void* t) -> int {
+diff --git a/src/snaplook.cpp b/src/snaplook.cpp
+index 6014b94..d5b3a18 100644
+--- a/src/snaplook.cpp
++++ b/src/snaplook.cpp
+@@ -1,29 +1,58 @@
+ #include "snaplook.h"
+ #include "main.h"
+ #include "conf.h"
++#include <dlfcn.h>
++#include <cstdio>
++
++namespace {
++typedef bool (*ZoomActiveFn)();
++
++// The zoom mod exports mcpelauncher_zoom_active(). Resolve it lazily: mods are
++// loaded through the custom linker, so try the default namespace first and then
++// an explicit handle by module name.
++ZoomActiveFn resolveZoomActive() {
++    static ZoomActiveFn fn = nullptr;
++    static bool tried = false;
++    if(!tried) {
++        tried = true;
++        fn = (ZoomActiveFn)dlsym(RTLD_DEFAULT, "mcpelauncher_zoom_active");
++        if(!fn) {
++            void* h = dlopen("libmcpelauncherzoom.so", RTLD_NOLOAD | RTLD_LAZY);
++            if(!h)
++                h = dlopen("libmcpelauncherzoom.so", RTLD_LAZY);
++            if(h)
++                fn = (ZoomActiveFn)dlsym(h, "mcpelauncher_zoom_active");
++        }
++        fprintf(stderr, "[Snaplook] zoom-active hook: %s\n", fn ? "available" : "unavailable");
++    }
++    return fn;
++}
++}  // namespace
++
++void snaplookResolveZoomLink() {
++    resolveZoomActive();
++}
+ 
+ int Snaplook::getPerspectiveOption(void* t) {
+-    if(inSnaplook) {
+-        return 2;  // third person front
++    int result = inSnaplook ? 1 : VanillaCameraAPI_getPlayerViewPerspectiveOption_orig(t);
++    // While zoomed, use first-person: a reduced FOV collapses Bedrock's
++    // third-person boom into the player, so first-person shows the blocks ahead.
++    if(result != 0) {
++        auto zoomActive = resolveZoomActive();
++        if(zoomActive && zoomActive())
++            return 0;
+     }
+-    return VanillaCameraAPI_getPlayerViewPerspectiveOption_orig(t);
++    return result;
+ }
+ 
+ void Snaplook::onKeyboard(int keyCode, int action) {
+     if(keyCode == Conf::snaplookKey) {
+-        switch(action) {
+-        case 0:
++        // Toggle on key press (action 0 = key down), ignore repeats and release.
++        if(action == 0) {
+             if(!game_window_is_mouse_locked(game_window_get_primary_window())) {
+                 return;
+             }
+-            inSnaplook = true;
+-            break;
+-        case 2:
+-            if(inSnaplook) {
+-                inSnaplook = false;
+-            }
+-        default:
+-            break;
++            inSnaplook = !inSnaplook;
+         }
+     }
+ }
+diff --git a/src/snaplook.h b/src/snaplook.h
+index c881c30..3ec5d79 100644
+--- a/src/snaplook.h
++++ b/src/snaplook.h
+@@ -6,4 +6,8 @@ public:
+     int getPerspectiveOption(void* t);
+     void onMouseLocked();
+     void onKeyboard(int keyCode, int action);
+-};
+\ No newline at end of file
++};
++
++// Call once after all mods are loaded (window creation) to resolve the optional
++// zoom-integration symbol.
++void snaplookResolveZoomLink();
+\ No newline at end of file
