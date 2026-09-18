@@ -62,7 +62,14 @@ done
 
 if [ -f SHA256SUMS.txt ]; then
   echo "Verifying checksums ..."
-  sha256sum -c --quiet SHA256SUMS.txt
+  # The checksum file may record absolute build paths (older releases) or
+  # relative paths. Normalize every entry to its basename so the check works
+  # against this flat download directory.
+  sed -E 's|^([0-9a-f]{64}) [ *].*/|\1  |' SHA256SUMS.txt > SHA256SUMS.local.txt
+  if ! sha256sum -c --quiet SHA256SUMS.local.txt; then
+    echo "ERROR: checksum verification failed." >&2
+    exit 1
+  fi
 else
   echo "WARNING: release has no SHA256SUMS.txt, skipping checksum verification." >&2
 fi
