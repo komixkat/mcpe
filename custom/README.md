@@ -8,6 +8,7 @@ obvious home and can be built, tested, and shipped as a unit.
 custom/
 ├── mods/                    curated, fixed launcher mods (vendored source)
 │   ├── build-mods.sh        cross-compiles every mod with the Android NDK
+│   ├── discordrpc/          Discord Rich Presence (version-independent)
 │   ├── fullbright/          fullbright mod
 │   ├── snaplook/            third-person-back toggle + first-person-while-zooming
 │   ├── zoom/                scroll zoom + FOV-proportional look dampening
@@ -96,3 +97,34 @@ and the launcher client force `only_show_trusted_skins=0` in `options.txt`.
 are missing, every session is treated as a failed resource load and the game
 shows the "Global Resources Reset — Resources failed to load previously"
 dialog at every launch.
+
+## Discord Rich Presence
+
+`mods/discordrpc/` adds rich presence to the launcher/game session: while
+playing, your Discord profile shows **Minecraft Bedrock `<version>`** with the
+state read from the live session:
+
+- `In the launcher...` while the game process boots,
+- `In the main menu` once it reaches the menu,
+- `Playing - <world name>` while a world is loaded (name parsed from
+  `level.dat`).
+
+The mod is deliberately free of game-internal hooks: it detects a loaded world
+by watching which `.../minecraftWorlds/<id>/` files the process holds open
+(via `/proc/self/fd`) and talks to Discord over its public unix-socket IPC
+protocol. That means it needs no signature updates and cannot crash the game
+on a future game update (unlike the hook-based mods above).
+
+Enable it once (2 minutes, requires your own Discord app ID — Discord shows
+the app's registered name/artwork, which only your own application controls):
+
+```bash
+cat > ~/.local/share/mcpelauncher/discordrpc.conf <<'EOF'
+client_id=PASTE_YOUR_DISCORD_APPLICATION_CLIENT_ID
+EOF
+```
+
+Then restart the game with Discord desktop running. Status is written to
+`~/.local/share/mcpelauncher/discordrpc.state`; details and setup notes live
+in `mods/discordrpc/README.md`. `install.sh` seeds a default
+`discordrpc.conf` (with `client_id=` empty) so the file is already in place.

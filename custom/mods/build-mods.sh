@@ -40,7 +40,7 @@ else
     ABIS=(x86_64 arm64-v8a)
 fi
 
-MODS=(fullbright snaplook zoom shulkerpreview)
+MODS=(fullbright snaplook zoom shulkerpreview discordrpc)
 
 for abi in "${ABIS[@]}"; do
     echo "==== building mods for $abi ===="

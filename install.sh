@@ -9,8 +9,10 @@
 #   2. deploys the runtime "updates" mod (game-version compatibility patches),
 #   3. deploys our fixed mods for the host architecture:
 #        libfullbright.so, libmcpelauncherzoom.so,
-#        libmcpelaunchersnaplook.so, libshulke.so
-#   4. installs the bundled custom skin pack and enables custom skins.
+#        libmcpelaunchersnaplook.so, libshulke.so,
+#        libmcpelauncherdiscordrpc.so (Discord Rich Presence)
+#   4. installs the bundled custom skin pack and enables custom skins,
+#   5. seeds a default discordrpc.conf so Discord presence can be enabled.
 #
 # The mods live in user data, so launcher/game updates never touch them, and
 # every run re-asserts them from this repository. Re-run this script at any
@@ -156,6 +158,22 @@ if [ -f "$OPTIONS" ]; then
 else
   echo "  Note: options.txt does not exist yet; the launcher forces custom"
   echo "        skins on at first launch, so no action is needed."
+fi
+
+# ---------------------------------------------------------------------------
+# Discord Rich Presence: seed a default config. The mod (shipped in the mods
+# bundle above) is disabled until the user pastes a Discord application Client
+# ID, so never overwrite a config that already exists.
+# ---------------------------------------------------------------------------
+if [ ! -f "$DATA_DIR/discordrpc.conf" ]; then
+  cat > "$DATA_DIR/discordrpc.conf" <<'EOF'
+# Discord Rich Presence for the launcher/game (custom/mods/discordrpc).
+# 1. Create a Discord application: https://discord.com/developers/applications
+# 2. Copy its Client ID into client_id below.
+# 3. Restart the game with Discord running; see ~/.local/share/mcpelauncher/discordrpc.state.
+client_id=
+EOF
+  echo "  OK: created discordrpc.conf (set client_id to enable presence)"
 fi
 
 # ---------------------------------------------------------------------------
