@@ -124,9 +124,17 @@ jobs:
           path: dist
           merge-multiple: true
 
-      - name: Generate checksums
+      # Artifacts may retain directory structure (e.g. packaging/core/...), so
+      # flatten every release file into flat/ by name before hashing/uploading.
+      - name: Collect release files
         run: |
           cd dist
+          mkdir -p flat
+          find . -type f \( -name '*.pkg.tar.zst' \
+                         -o -name 'mcpelauncher-mods-*.tar.gz' \
+                         -o -name 'mcpelauncher-skinpack.tar.gz' \) \
+            -exec cp -f {} flat/ \;
+          cd flat
           sha256sum *.pkg.tar.zst mcpelauncher-mods-*.tar.gz mcpelauncher-skinpack.tar.gz > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
@@ -147,7 +155,7 @@ jobs:
             'The installer deploys the launcher packages, the runtime updates mod,' \
             'the fixed mods for your CPU architecture, and the bundled skin pack.' \
             > notes.md
-          gh release create latest dist/* \
+          gh release create latest dist/flat/* \
             --repo komixkat/mcpe \
             --title "mcpelauncher (latest build)" \
             --notes-file notes.md
