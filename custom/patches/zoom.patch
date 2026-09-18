@@ -1,3 +1,57 @@
+diff --git a/src/conf.cpp b/src/conf.cpp
+index d87caf1..358876d 100644
+--- a/src/conf.cpp
++++ b/src/conf.cpp
+@@ -7,12 +7,16 @@
+ 
+ int Conf::zoomKey = 'C';
+ bool Conf::animated = true;
++float Conf::sensitivityMultiplier = 2.0f;
++float Conf::sensitivityFloor = 0.15f;
+ 
+ bool Conf::changingKey = false;
+ 
+ static properties::property_list conf('=');
+ static properties::property<int> zoomKey(conf, "zoomKey", 'C');
+ static properties::property<bool> animated(conf, "animated", true);
++static properties::property<float> sensitivityMultiplier(conf, "sensitivityMultiplier", 2.0f);
++static properties::property<float> sensitivityFloor(conf, "sensitivityFloor", 0.15f);
+ 
+ std::string Conf::getPath() {
+     return "/data/data/com.mojang.minecraftpe/zoom.conf";
+@@ -25,11 +29,15 @@ void Conf::load() {
+     }
+     Conf::zoomKey = ::zoomKey.get();
+     Conf::animated = ::animated.get();
++    Conf::sensitivityMultiplier = ::sensitivityMultiplier.get();
++    Conf::sensitivityFloor = ::sensitivityFloor.get();
+ }
+ 
+ void Conf::save() {
+     ::zoomKey.set(Conf::zoomKey);
+     ::animated.set(Conf::animated);
++    ::sensitivityMultiplier.set(Conf::sensitivityMultiplier);
++    ::sensitivityFloor.set(Conf::sensitivityFloor);
+ 
+     std::ofstream propertiesFile(getPath());
+     if(propertiesFile) {
+diff --git a/src/conf.h b/src/conf.h
+index e969bfd..97985a3 100644
+--- a/src/conf.h
++++ b/src/conf.h
+@@ -5,6 +5,12 @@ struct Conf {
+     static int zoomKey;
+     static bool animated;
+ 
++    // Sensitivity when zoomed is the exact screen-space ratio multiplied by
++    // sensitivityMultiplier, never dropping below sensitivityFloor so deep
++    // zoom stays usable. Both are tunable in zoom.conf.
++    static float sensitivityMultiplier;
++    static float sensitivityFloor;
++
+     static bool changingKey;
+ 
+     static std::string getPath();
 diff --git a/src/main.cpp b/src/main.cpp
 index 0be17cb..545eaa0 100644
 --- a/src/main.cpp
@@ -115,10 +169,10 @@ index 6c3ee5b..f578f5e 100644
  inline unsigned long (*CameraAPI_tryGetFOV_orig)(void*);
 \ No newline at end of file
 diff --git a/src/zoom.cpp b/src/zoom.cpp
-index 7041cad..6337be0 100644
+index 7041cad..1a4173d 100644
 --- a/src/zoom.cpp
 +++ b/src/zoom.cpp
-@@ -2,21 +2,66 @@
+@@ -2,21 +2,74 @@
  #include "main.h"
  #include "util.h"
  #include "conf.h"
@@ -149,6 +203,11 @@ index 7041cad..6337be0 100644
 +// Dampen look sensitivity by the angular FOV ratio so a zoomed view keeps the
 +// same on-screen amount of movement per mouse count. Only applies on launcher
 +// builds that expose the hook (NULL on older builds).
++//
++// Pure screen-space aiming feels too slow to most players, so the ratio is
++// scaled up by Conf::sensitivityMultiplier and floored at
++// Conf::sensitivityFloor to keep deep zoom usable. Both are tunable in
++// zoom.conf; set multiplier to 1.0 and floor to 0.0 for the exact ratio.
 +static void applyZoomSensitivity(unsigned long current, unsigned long normal) {
 +    if(!game_window_set_mouse_relative_scale)
 +        return;
@@ -161,8 +220,11 @@ index 7041cad..6337be0 100644
 +        if(tn > 1e-6f)
 +            scale = tz / tn;
 +    }
-+    if(!(scale > 0.0f) || scale > 1.0f)  // only dampen, never amplify; catches NaN
-+        scale = 1.0f;
++    if(scale > 0.0f && scale <= 1.0f) {  // only dampen when a real zoom ratio is present
++        scale = std::max(scale * Conf::sensitivityMultiplier, Conf::sensitivityFloor);
++        if(scale > 1.0f)  // never amplify above normal
++            scale = 1.0f;
++    }
 +    game_window_set_mouse_relative_scale(game_window_get_primary_window(), scale);
 +}
  
@@ -193,7 +255,7 @@ index 7041cad..6337be0 100644
  }
  
  bool Zoom::onMouseScroll(double dy) {
-@@ -53,6 +98,9 @@ void Zoom::onKeyboard(int keyCode, int action) {
+@@ -53,6 +106,9 @@ void Zoom::onKeyboard(int keyCode, int action) {
          case 2:
              if(zoomKeyDown) {
                  zoomKeyDown = false;

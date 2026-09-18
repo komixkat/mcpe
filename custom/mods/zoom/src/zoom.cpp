@@ -29,6 +29,11 @@ static inline float packedFovToFloat(unsigned long v) {
 // Dampen look sensitivity by the angular FOV ratio so a zoomed view keeps the
 // same on-screen amount of movement per mouse count. Only applies on launcher
 // builds that expose the hook (NULL on older builds).
+//
+// Pure screen-space aiming feels too slow to most players, so the ratio is
+// scaled up by Conf::sensitivityMultiplier and floored at
+// Conf::sensitivityFloor to keep deep zoom usable. Both are tunable in
+// zoom.conf; set multiplier to 1.0 and floor to 0.0 for the exact ratio.
 static void applyZoomSensitivity(unsigned long current, unsigned long normal) {
     if(!game_window_set_mouse_relative_scale)
         return;
@@ -41,8 +46,11 @@ static void applyZoomSensitivity(unsigned long current, unsigned long normal) {
         if(tn > 1e-6f)
             scale = tz / tn;
     }
-    if(!(scale > 0.0f) || scale > 1.0f)  // only dampen, never amplify; catches NaN
-        scale = 1.0f;
+    if(scale > 0.0f && scale <= 1.0f) {  // only dampen when a real zoom ratio is present
+        scale = std::max(scale * Conf::sensitivityMultiplier, Conf::sensitivityFloor);
+        if(scale > 1.0f)  // never amplify above normal
+            scale = 1.0f;
+    }
     game_window_set_mouse_relative_scale(game_window_get_primary_window(), scale);
 }
 

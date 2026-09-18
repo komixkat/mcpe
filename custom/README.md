@@ -54,8 +54,20 @@ Output lands in `custom/mods/out/<abi>/`.
   On a mismatch it logs `... disabled` and leaves the game untouched instead of
   dereferencing a bad pointer.
 - **Zoom sensitivity always matches the zoom level.** The zoom mod computes the
-  angular FOV ratio from the live camera each frame, so it holds from the
-  default 16.8° all the way down to the 0.9° maximum.
+  angular FOV ratio from the live camera each frame, from the default 16.8°
+  all the way down to the 0.9° maximum. The exact ratio feels too slow to most
+  players, so it is scaled up by `sensitivityMultiplier` (default `2`) and
+  kept above `sensitivityFloor` (default `0.15`). Tune both in
+  `games/com.mojang.minecraftpe/zoom.conf` (i.e. `~/.local/share/mcpelauncher/zoom.conf`):
+
+  ```
+  zoomKey=67
+  animated=true
+  sensitivityMultiplier=2
+  sensitivityFloor=0.15
+  ```
+
+  `multiplier=1` + `floor=0` restores the exact screen-space ratio.
 
 ## If a game update does invalidate a signature
 
