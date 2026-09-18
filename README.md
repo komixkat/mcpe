@@ -16,6 +16,12 @@ This downloads the latest built `mcpelauncher-linux-mcpe` and
 `mcpelauncher-ui-mcpe` packages from the GitHub Releases of this repository
 and installs them with pacman. No AUR, no compilation on your machine.
 
+The same release also carries the fixed mods (fullbright, zoom, snaplook,
+shulker preview) for `x86_64` and `arm64-v8a`, plus the bundled skin pack. The
+installer deploys the matching bundle into `~/.local/share/mcpelauncher/mods/`,
+so a single command gives you the launcher *and* the working mods. Re-run it at
+any time to repair or update them.
+
 Binaries are rebuilt and published automatically on a weekly schedule (and
 on every push to the `qt6` branch) by the `build` workflow in
 `.github/workflows/`.
@@ -82,13 +88,17 @@ and rebuilt.
 - `mcpelauncher-client/`, `mcpelauncher-core/` and the rest: the launcher
   source with the login and 1.26.x fixes applied.
 - `ui/`: the Qt launcher UI source (vendored, single-tree).
+- `custom/`: everything this fork adds — the fixed mod sources
+  (`custom/mods/`), the skin pack (`custom/skin/`), the provenance patches, and
+  the mod build script. `custom/README.md` explains the layout and how the mods
+  are kept working across launcher and game updates.
 - `mods/`: `libmcpelauncher-updates.so` and the PairIP / PlayFab patches that
   the launcher loads at runtime.
 - `packaging/`: Arch `PKGBUILD`s, the uploaded fix patches, and the recorded
   upstream state.
-- `install.sh`: the one-command installer.
-- `.github/workflows/`: `build.yml` (compiles and publishes packages) and
-  `sync-upstream.yml` (tracks upstream).
+- `install.sh`: the one-command installer (launcher + fixed mods + skin pack).
+- `.github/workflows/`: `build.yml` (compiles packages and mods, publishes the
+  release) and `sync-upstream.yml` (tracks upstream).
 
 ## Credits
 

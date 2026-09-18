@@ -4,3 +4,9 @@ cmake-build-debug-clang
 cmake-build-release
 cmake-build-release-clang
 .idea
+
+# custom/mods build output
+custom/mods/out/
+custom/mods/*/build-*/
+custom/mods/*/build/
+custom/mods/*/cpm-cache/

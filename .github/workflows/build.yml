@@ -11,7 +11,10 @@ permissions:
   contents: write
 
 jobs:
-  build:
+  # ---------------------------------------------------------------------------
+  # Launcher core + UI packages (Arch).
+  # ---------------------------------------------------------------------------
+  packages:
     runs-on: ubuntu-latest
     container: archlinux:latest
     steps:
@@ -23,7 +26,7 @@ jobs:
             curl zlib libpng libevdev systemd libxi libegl libuv \
             qt6-base qt6-declarative qt6-webengine qt6-webchannel \
             qt6-tools qt6-svg vulkan-headers libxinerama libzip protobuf \
-            openssl hicolor-icon-theme desktop-file-utils ninja github-cli
+            openssl hicolor-icon-theme desktop-file-utils ninja
 
       - name: Checkout
         uses: actions/checkout@v4
@@ -56,18 +59,95 @@ jobs:
             packaging/core/*.pkg.tar.zst
             packaging/ui/*.pkg.tar.zst
 
+  # ---------------------------------------------------------------------------
+  # Fixed launcher mods + skin pack, cross-compiled with the Android NDK.
+  # ---------------------------------------------------------------------------
+  mods:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: qt6
+
+      - name: Cache Android NDK
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/android-ndk-r27c
+          key: android-ndk-r27c
+
+      - name: Install Android NDK
+        run: |
+          NDK="$RUNNER_TEMP/android-ndk-r27c"
+          if [ ! -f "$NDK/build/cmake/android.toolchain.cmake" ]; then
+            curl -fL -o /tmp/android-ndk.zip \
+              https://dl.google.com/android/repository/android-ndk-r27c-linux.zip
+            unzip -q /tmp/android-ndk.zip -d "$RUNNER_TEMP"
+          fi
+          test -f "$NDK/build/cmake/android.toolchain.cmake"
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build
+
+      - name: Build mods (x86_64 + arm64-v8a)
+        env:
+          ANDROID_NDK_HOME: ${{ runner.temp }}/android-ndk-r27c
+        run: ./custom/mods/build-mods.sh x86_64 arm64-v8a
+
+      - name: Package mod bundles and skin pack
+        run: |
+          cd custom/mods/out
+          tar -czf "$GITHUB_WORKSPACE/mcpelauncher-mods-x86_64.tar.gz"   -C x86_64 .
+          tar -czf "$GITHUB_WORKSPACE/mcpelauncher-mods-arm64-v8a.tar.gz" -C arm64-v8a .
+          tar -czf "$GITHUB_WORKSPACE/mcpelauncher-skinpack.tar.gz"      -C "$GITHUB_WORKSPACE/custom/skin" .
+
+      - name: Upload mods
+        uses: actions/upload-artifact@v4
+        with:
+          name: mods
+          path: |
+            mcpelauncher-mods-*.tar.gz
+            mcpelauncher-skinpack.tar.gz
+
+  # ---------------------------------------------------------------------------
+  # Publish one rolling "latest" release with packages + mods + skin pack.
+  # ---------------------------------------------------------------------------
+  publish:
+    needs: [packages, mods]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: |
+          cd dist
+          sha256sum *.pkg.tar.zst mcpelauncher-mods-*.tar.gz mcpelauncher-skinpack.tar.gz > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
       - name: Publish release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          dist="$GITHUB_WORKSPACE/dist"
-          mkdir -p "$dist"
-          cp "$GITHUB_WORKSPACE"/packaging/core/*.pkg.tar.zst "$dist/"
-          cp "$GITHUB_WORKSPACE"/packaging/ui/*.pkg.tar.zst "$dist/"
-          sha256sum "$dist"/*.pkg.tar.zst > "$dist/SHA256SUMS.txt"
           gh release delete latest --repo komixkat/mcpe --yes --cleanup-tag 2>/dev/null || true
-          printf 'Automated build of the fixed qt6 launcher.\n\nInstall with:\n\n```bash\ncurl -sL https://raw.githubusercontent.com/komixkat/mcpe/qt6/install.sh | bash\n```\n' > "$GITHUB_WORKSPACE/notes.md"
-          gh release create latest "$dist"/mcpelauncher-linux-mcpe-*-x86_64.pkg.tar.zst "$dist"/mcpelauncher-ui-mcpe-*-x86_64.pkg.tar.zst "$dist"/SHA256SUMS.txt \
+          printf '%s\n' \
+            'Automated build of the fixed qt6 launcher **and** the fixed mods.' \
+            '' \
+            'Install with:' \
+            '' \
+            '```bash' \
+            'curl -sL https://raw.githubusercontent.com/komixkat/mcpe/qt6/install.sh | bash' \
+            '```' \
+            '' \
+            'The installer deploys the launcher packages, the runtime updates mod,' \
+            'the fixed mods for your CPU architecture, and the bundled skin pack.' \
+            > notes.md
+          gh release create latest dist/* \
             --repo komixkat/mcpe \
             --title "mcpelauncher (latest build)" \
-            --notes-file "$GITHUB_WORKSPACE/notes.md"
+            --notes-file notes.md
