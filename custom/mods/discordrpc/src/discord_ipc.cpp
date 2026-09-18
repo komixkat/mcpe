@@ -65,6 +65,41 @@ bool jsonHasField(const std::string& payload, const std::string& field,
     }
     return false;
 }
+
+// Extract the string value of a JSON field, e.g. "key":"value" -> value.
+std::string extractJsonString(const std::string& payload, const std::string& key) {
+    size_t i = payload.find(key);
+    while (i != std::string::npos) {
+        size_t j = i + key.size();
+        while (j < payload.size() && (payload[j] == ' ' || payload[j] == '\t')) ++j;
+        if (j < payload.size() && payload[j] == ':') {
+            ++j;
+            while (j < payload.size() && (payload[j] == ' ' || payload[j] == '\t')) ++j;
+            if (j < payload.size() && payload[j] == '"') {
+                ++j;
+                std::string out;
+                bool esc = false;
+                for (; j < payload.size(); ++j) {
+                    char c = payload[j];
+                    if (esc) {
+                        out += c;
+                        esc = false;
+                        continue;
+                    }
+                    if (c == '\\') {
+                        esc = true;
+                        continue;
+                    }
+                    if (c == '"') break;
+                    out += c;
+                }
+                return out;
+            }
+        }
+        i = payload.find(key, i + 1);
+    }
+    return "";
+}
 }  // namespace
 
 std::string jsonEscape(const std::string& s) {
@@ -231,6 +266,16 @@ void DiscordIpc::consumeFrame(Opcode op, const std::string& payload) {
         return;
     }
     if (op == Opcode::Frame) {
+        // A friend clicked "Join Game" on our profile.
+        if (jsonHasField(payload, "\"evt\"", "\"ACTIVITY_JOIN\"")) {
+            JoinRequest r;
+            r.userId = extractJsonString(payload, "\"id\"");
+            r.username = extractJsonString(payload, "\"username\"");
+            r.secret = extractJsonString(payload, "\"secret\"");
+            r.valid = !r.userId.empty() || !r.username.empty();
+            if (r.valid) lastJoin_ = std::move(r);
+            return;
+        }
         // SET_ACTIVITY acks carry the nonce we sent; surface errors only.
         if (!lastNonce_.empty() && payload.find(lastNonce_) != std::string::npos &&
             jsonHasField(payload, "\"evt\"", "\"ERROR\"")) {
@@ -310,23 +355,49 @@ bool DiscordIpc::connect(const std::string& clientId) {
     return false;
 }
 
-bool DiscordIpc::setActivity(const std::string& state, const std::string& details,
-                             std::int64_t startMs) {
+bool DiscordIpc::setActivity(const Activity& a) {
     if (fd_ < 0) return false;
     ++nonceCounter_;
     char nonce[48];
     std::snprintf(nonce, sizeof(nonce), "mcpe-%u", nonceCounter_);
     lastNonce_ = nonce;
 
-    std::string activity;
-    activity += "{\"state\":\"" + jsonEscape(state) + "\",";
-    activity += "\"details\":\"" + jsonEscape(details) + "\",";
-    activity += "\"timestamps\":{\"start\":" + std::to_string(startMs) + "},";
-    activity += "\"instance\":true,\"type\":0}";
+    std::string act;
+    act += "{";
+    if (!a.state.empty())
+        act += "\"state\":\"" + jsonEscape(a.state) + "\",";
+    if (!a.details.empty())
+        act += "\"details\":\"" + jsonEscape(a.details) + "\",";
+    if (a.startMs > 0)
+        act += "\"timestamps\":{\"start\":" + std::to_string(a.startMs) + "},";
+    if (!a.largeImage.empty() || !a.largeText.empty() || !a.smallImage.empty() ||
+        !a.smallText.empty()) {
+        act += "\"assets\":{";
+        bool first = true;
+        auto put = [&](const std::string& k, const std::string& v) {
+            if (v.empty()) return;
+            if (!first) act += ",";
+            first = false;
+            act += "\"" + k + "\":\"" + jsonEscape(v) + "\"";
+        };
+        put("large_image", a.largeImage);
+        put("large_text", a.largeText);
+        put("small_image", a.smallImage);
+        put("small_text", a.smallText);
+        act += "},";
+    }
+    if (!a.partyId.empty() && a.partyMax > 0) {
+        act += "\"party\":{\"id\":\"" + jsonEscape(a.partyId) + "\",\"size\":[" +
+               std::to_string(a.partySize < 0 ? 0 : a.partySize) + "," +
+               std::to_string(a.partyMax) + "]},";
+    }
+    if (!a.joinSecret.empty())
+        act += "\"secrets\":{\"join\":\"" + jsonEscape(a.joinSecret) + "\"},";
+    act += "\"instance\":true,\"type\":0}";
 
     std::string payload = "{\"cmd\":\"SET_ACTIVITY\",\"args\":{\"pid\":" +
                           std::to_string(static_cast<long>(getpid())) +
-                          ",\"activity\":" + activity + "},\"nonce\":\"" + nonce + "\"}";
+                          ",\"activity\":" + act + "},\"nonce\":\"" + nonce + "\"}";
     lastError_.clear();
     return sendFrame(Opcode::Frame, payload);
 }

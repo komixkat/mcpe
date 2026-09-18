@@ -2,8 +2,9 @@
 
 #include "discord_ipc.h"
 
-#include <chrono>
+#include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <climits>
 #include <cstdio>
 #include <cstring>
@@ -12,6 +13,7 @@
 #include <fstream>
 #include <iterator>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <unistd.h>
@@ -26,20 +28,43 @@ namespace {
 // is redirected by the client to ~/.local/share/mcpelauncher.
 constexpr const char* kConfPath = "/data/data/com.mojang.minecraftpe/discordrpc.conf";
 constexpr const char* kStatePath = "/data/data/com.mojang.minecraftpe/discordrpc.state";
+constexpr const char* kJoinPath = "/data/data/com.mojang.minecraftpe/discordrpc.join";
 constexpr const char* kVersionsPath =
     "/data/data/com.mojang.minecraftpe/versions/versions.ini";
 
 properties::property_list kConf('=');
 properties::property<std::string> kClientId(kConf, "client_id", "");
 properties::property<bool> kLogEnabled(kConf, "log", true);
+properties::property<bool> kShowVersion(kConf, "show_version", false);
+properties::property<std::string> kLargeImage(kConf, "large_image", "");
+properties::property<std::string> kLargeText(kConf, "large_text", "");
+properties::property<std::string> kSmallImage(kConf, "small_image", "");
+properties::property<std::string> kSmallText(kConf, "small_text", "");
+properties::property<bool> kJoinEnabled(kConf, "join_enabled", true);
+properties::property<int> kJoinMax(kConf, "join_max", 10);
+properties::property<std::string> kJoinAddress(kConf, "join_address", "");
+properties::property<std::string> kMultiplayer(kConf, "multiplayer", "");
 
 std::string gClientId;
 std::string gVersion;
 bool gLog = true;
+bool gShowVersion = false;
+std::string gLargeImage, gLargeText, gSmallImage, gSmallText;
+bool gJoinEnabled = true;
+int gJoinMax = 10;
+std::string gJoinAddress;
+std::string gMultiplayer;  // "" (auto) | "server" | "realm"
 
 // ---------------------------------------------------------------------------
 // small file/string helpers
 // ---------------------------------------------------------------------------
+
+std::string trim(std::string s) {
+    size_t b = s.find_first_not_of(" \t\r\n");
+    if (b == std::string::npos) return "";
+    size_t e = s.find_last_not_of(" \t\r\n");
+    return s.substr(b, e - b + 1);
+}
 
 std::string readFirstLine(const std::string& path) {
     std::ifstream in(path);
@@ -59,7 +84,7 @@ std::string findVersion() {
             std::string v = line.substr(12);
             while (!v.empty() && (v.back() == '\r' || v.back() == '\n'))
                 v.pop_back();
-            return v;
+            return trim(v);
         }
     }
     return "";
@@ -75,8 +100,8 @@ bool allDigits(const std::string& s) {
 
 // ---------------------------------------------------------------------------
 // Bedrock level.dat: an 8-byte header (0x0A 00 00 00 + uint32 LE length)
-// followed by an NBT compound whose children include TAG_String "LevelName".
-// Parse defensively; return "" on any malformed input.
+// followed by an NBT compound holding LevelName (TAG_String) and GameType
+// (TAG_Int). Parse defensively.
 // ---------------------------------------------------------------------------
 
 namespace nbt {
@@ -87,6 +112,7 @@ struct Reader {
     int depth = 0;
     bool fail = false;
     std::string levelName;
+    int gameType = -1;
 
     explicit Reader(const std::vector<unsigned char>& data) : d(data) {}
 
@@ -133,11 +159,17 @@ struct Reader {
             if (tag == 0) break;  // TAG_End
             std::string name = str();
             if (fail) return;
-            if (tag == 8 && name == "LevelName") {  // TAG_String
+            if (tag == 3 && name == "GameType") {  // TAG_Int
+                gameType = i32();
+            } else if (tag == 8 && name == "LevelName") {  // TAG_String
                 levelName = str();
-                return;  // found what we need; stop early
+            } else {
+                skipPayload(tag);
             }
-            skipPayload(tag);
+            if (!levelName.empty() && gameType >= 0) {
+                --depth;
+                return;  // both fields found
+            }
         }
         --depth;
     }
@@ -209,19 +241,20 @@ struct Reader {
 
 }  // namespace nbt
 
-std::string readLevelNameFromLevelDat(const std::string& file) {
+// Returns (display name, game type) from a world's level.dat.
+std::pair<std::string, int> readLevelData(const std::string& file) {
     std::ifstream in(file, std::ios::binary);
-    if (!in) return "";
+    if (!in) return {"", -1};
     std::vector<unsigned char> data((std::istreambuf_iterator<char>(in)),
                                     std::istreambuf_iterator<char>());
-    if (data.size() < 9) return "";
+    if (data.size() < 9) return {"", -1};
     // Level.dat has an 8-byte header; pure NBT dumps start directly with 0x0A.
     size_t start = (data[0] == 0x0a && data[1] == 0 && data[2] == 0 && data[3] == 0) ? 8 : 0;
-    if (data[start] != 0x0a) return "";
+    if (data[start] != 0x0a) return {"", -1};
     nbt::Reader r(data);
     r.pos = start + 1;  // skip root TAG_Compound id
     r.compound();
-    return r.levelName;
+    return {trim(r.levelName), r.gameType};
 }
 
 // ---------------------------------------------------------------------------
@@ -255,22 +288,95 @@ std::string findOpenWorldDir() {
     return result;
 }
 
-std::string worldDisplayName(const std::string& worldDir, const std::string& worldId) {
-    std::string name = readFirstLine(worldDir + "/levelname.txt");
-    if (name.empty()) name = readLevelNameFromLevelDat(worldDir + "/level.dat");
-    if (name.empty()) name = worldId;
-    return name;
+// ---------------------------------------------------------------------------
+// multiplayer hint: is the game talking to a real remote peer over UDP?
+// Reading a LAN/realm world shows bind-only listeners + discovery traffic;
+// an external server/realm relay shows an established socket to a non-local
+// address that is not a discovery service port.
+// ---------------------------------------------------------------------------
+
+bool remoteServerUdp() {
+    const char* files[] = {"/proc/net/udp", "/proc/net/udp6"};
+    for (const char* f : files) {
+        std::ifstream in(f);
+        if (!in) continue;
+        std::string line;
+        std::getline(in, line);  // header
+        while (std::getline(in, line)) {
+            std::istringstream ss(line);
+            std::string sl, local, rem, st;
+            if (!(ss >> sl >> local >> rem >> st)) continue;
+            if (st != "01") continue;  // established (connected) only
+            size_t colon = rem.rfind(':');
+            if (colon == std::string::npos || colon == 0) continue;
+            std::string raddr = rem.substr(0, colon);
+            std::string rportHex = rem.substr(colon + 1);
+            if (rportHex.empty()) continue;
+            int rport = static_cast<int>(std::strtol(rportHex.c_str(), nullptr, 16));
+            if (raddr == "0100007F" || raddr == "00000000") continue;  // 127.0.0.1, 0.0.0.0
+            if (raddr == "00000000000000000000000000000000") continue;  // ::
+            if (raddr == "00000000000000000000000000000001") continue;  // ::1
+            if (raddr.size() >= 2) {
+                unsigned char first = static_cast<unsigned char>(
+                    std::strtol(raddr.substr(0, 2).c_str(), nullptr, 16));
+                if (first >= 0xE0 && first <= 0xEF) continue;  // multicast (mDNS etc.)
+            }
+            switch (rport) {  // discovery / system services are not game traffic
+                case 53: case 67: case 68: case 5353: case 5355: continue;
+                default: break;
+            }
+            return true;
+        }
+    }
+    return false;
 }
 
-enum class GameState { Launching, MainMenu, Playing };
+// ---------------------------------------------------------------------------
+// state construction
+// ---------------------------------------------------------------------------
 
-std::string stateTextFor(GameState st, const std::string& worldName) {
-    switch (st) {
-        case GameState::Launching: return "In the launcher...";
-        case GameState::MainMenu: return "In the main menu";
-        case GameState::Playing: return "Playing - " + worldName;
+enum class WorldMode { Survival, Creative, Adventure, Spectator, Unknown };
+
+WorldMode modeOf(int gameType) {
+    switch (gameType) {
+        case 0: return WorldMode::Survival;
+        case 1: return WorldMode::Creative;
+        case 2: return WorldMode::Adventure;
+        case 6: return WorldMode::Spectator;
+        default: return WorldMode::Unknown;
     }
-    return "In the main menu";
+}
+
+std::string worldStateText(const std::string& name, int gameType) {
+    switch (modeOf(gameType)) {
+        case WorldMode::Survival: return "In a survival world: " + name;
+        case WorldMode::Creative: return "In a creative world: " + name;
+        case WorldMode::Adventure: return "In an adventure world: " + name;
+        case WorldMode::Spectator: return "Spectating: " + name;
+        default: return "In a world: " + name;
+    }
+}
+
+struct WorldInfo {
+    std::string dir;
+    std::string id;
+    std::string name;
+    int gameType = -1;
+};
+
+WorldInfo probeWorld() {
+    WorldInfo w;
+    w.dir = findOpenWorldDir();
+    if (w.dir.empty()) return w;
+    size_t pos = w.dir.rfind('/');
+    w.id = pos == std::string::npos ? w.dir : w.dir.substr(pos + 1);
+    std::string display = readFirstLine(w.dir + "/levelname.txt");
+    auto ld = readLevelData(w.dir + "/level.dat");
+    if (display.empty()) display = ld.first;
+    if (display.empty()) display = w.id;
+    w.name = display;
+    w.gameType = ld.second;
+    return w;
 }
 
 std::int64_t nowMs() {
@@ -279,17 +385,36 @@ std::int64_t nowMs() {
         .count();
 }
 
-// Tiny status file at the data root so presence can be inspected without
-// reading the launcher log: connected, state, details, version, last error.
-void writeStateFile(const DiscordIpc& ipc, const std::string& stateText,
-                    const std::string& details) {
+bool sameActivity(const Activity& x, const Activity& y) {
+    return x.state == y.state && x.details == y.details && x.startMs == y.startMs &&
+           x.partyId == y.partyId && x.partySize == y.partySize &&
+           x.partyMax == y.partyMax && x.joinSecret == y.joinSecret;
+}
+
+void writeStateFile(const DiscordIpc& ipc, const Activity& a) {
     std::ofstream out(kStatePath, std::ios::trunc);
     if (!out) return;
     out << "connected=" << (ipc.connected() ? "1" : "0") << "\n";
-    out << "state=" << stateText << "\n";
-    out << "details=" << details << "\n";
+    out << "state=" << a.state << "\n";
+    out << "details=" << a.details << "\n";
+    if (a.partyMax > 0)
+        out << "party=" << a.partySize << "/" << a.partyMax << "\n";
+    out << "join=" << (a.joinSecret.empty() ? std::string("") : std::string("ready"))
+        << "\n";
     out << "version=" << gVersion << "\n";
     out << "error=" << ipc.lastError() << "\n";
+}
+
+void writeJoinFile(const JoinRequest& r, const std::string& joinAddress) {
+    std::ofstream out(kJoinPath, std::ios::trunc);
+    if (!out) return;
+    out << "username=" << r.username << "\n";
+    out << "user_id=" << r.userId << "\n";
+    out << "secret=" << r.secret << "\n";
+    out << "connect=" << (joinAddress.empty()
+                              ? std::string("ask the host for their LAN/VPN address")
+                              : joinAddress)
+        << "\n";
 }
 
 }  // namespace
@@ -298,15 +423,21 @@ bool presenceInit() {
     try {
         std::ifstream f(kConfPath);
         if (f) kConf.load(f);
-        gClientId = std::string(kClientId.get());
+        gClientId = trim(std::string(kClientId.get()));
         gLog = kLogEnabled.get();
+        gShowVersion = kShowVersion.get();
+        gLargeImage = trim(std::string(kLargeImage.get()));
+        gLargeText = trim(std::string(kLargeText.get()));
+        gSmallImage = trim(std::string(kSmallImage.get()));
+        gSmallText = trim(std::string(kSmallText.get()));
+        gJoinEnabled = kJoinEnabled.get();
+        gJoinMax = std::max(1, kJoinMax.get());
+        gJoinAddress = trim(std::string(kJoinAddress.get()));
+        gMultiplayer = trim(std::string(kMultiplayer.get()));
+        if (gMultiplayer != "server" && gMultiplayer != "realm") gMultiplayer.clear();
     } catch (const std::exception& ex) {
         std::fprintf(stderr, "[DiscordRPC] ignoring bad config: %s\n", ex.what());
     }
-
-    size_t b = gClientId.find_first_not_of(" \t\r\n");
-    size_t e = gClientId.find_last_not_of(" \t\r\n");
-    gClientId = (b == std::string::npos) ? "" : gClientId.substr(b, e - b + 1);
 
     if (!allDigits(gClientId)) {
         std::fprintf(stderr,
@@ -331,14 +462,13 @@ void runPresence() {
     auto nextRefresh = std::chrono::steady_clock::time_point::min();
     auto bootStart = std::chrono::steady_clock::now();
 
-    std::string details =
-        gVersion.empty() ? "Minecraft Bedrock" : "Minecraft Bedrock " + gVersion;
+    std::string details = gShowVersion ? "Playing Minecraft " + gVersion : "Playing Minecraft";
 
-    GameState state = GameState::Launching;
-    std::string stateText = stateTextFor(state, "");
-    std::string worldDir;
-    std::string worldName;
+    WorldInfo world;
+    int pendingJoins = 0;
+    std::string stateText = "In the launcher...";
     std::int64_t startMs = nowMs();
+    Activity sent;  // last activity that Discord accepted
 
     for (;;) {
         try {
@@ -354,12 +484,7 @@ void runPresence() {
                     backoffSec = 2;
                     failLogged = false;
                     if (gLog) std::fprintf(stderr, "[DiscordRPC] connected (READY)\n");
-                    if (!ipc.setActivity(stateText, details, startMs)) {
-                        ipc.disconnect();
-                        continue;
-                    }
-                    ipc.pump(250);
-                    writeStateFile(ipc, stateText, details);
+                    sent = Activity{};
                 } else {
                     if (gLog && !failLogged) {
                         std::fprintf(stderr, "[DiscordRPC] Discord unavailable: %s\n",
@@ -367,56 +492,73 @@ void runPresence() {
                         failLogged = true;
                     }
                     backoffSec = std::min(backoffSec * 2, 30);
-                    writeStateFile(ipc, stateText, details);
+                    writeStateFile(ipc, sent);
                     continue;
                 }
             }
 
             // ---- sample the game state ----
-            std::string cur = findOpenWorldDir();
-            if (cur != worldDir) {  // world opened or closed
-                worldDir = cur;
-                if (!worldDir.empty()) {
-                    size_t pos = worldDir.rfind('/');
-                    std::string id = pos == std::string::npos ? worldDir
-                                                              : worldDir.substr(pos + 1);
-                    worldName = worldDisplayName(worldDir, id);
-                } else {
-                    worldName.clear();
-                }
+            WorldInfo cur = probeWorld();
+            if (cur.dir != world.dir) {  // world opened, changed or closed
+                world = cur;
+                pendingJoins = 0;
             }
 
+            bool loaded = !world.dir.empty();
             double elapsed = std::chrono::duration<double>(
                                  std::chrono::steady_clock::now() - bootStart)
                                  .count();
-            GameState next = GameState::MainMenu;
-            if (!worldDir.empty())
-                next = GameState::Playing;
-            else if (elapsed < 10.0)
-                next = GameState::Launching;
 
-            std::string nextText = stateTextFor(next, worldName);
-            if (next != state || nextText != stateText) {
-                state = next;
-                stateText = nextText;
+            std::string nextState;
+            if (!loaded) {
+                nextState = (elapsed < 10.0) ? "In the launcher..." : "In the menus";
+            } else if (gMultiplayer == "realm") {
+                nextState = "On a Realm: " + world.name;
+            } else if (gMultiplayer == "server" || remoteServerUdp()) {
+                nextState = "On a server: " + world.name;
+            } else {
+                nextState = worldStateText(world.name, world.gameType);
+            }
+
+            if (nextState != stateText) {
+                stateText = nextState;
                 startMs = nowMs();
             }
 
+            // ---- assemble the activity (party + join when a world is open) ----
+            Activity a;
+            a.state = stateText;
+            a.details = details;
+            a.startMs = startMs;
+            a.largeImage = gLargeImage;
+            a.largeText = gLargeText;
+            a.smallImage = gSmallImage;
+            a.smallText = gSmallText;
+            if (loaded && gJoinEnabled && gJoinMax > 0) {
+                a.partyId = "world-" + world.id;
+                a.partySize = std::min(1 + pendingJoins, gJoinMax);
+                a.partyMax = gJoinMax;
+                a.joinSecret = gJoinAddress.empty() ? world.id : gJoinAddress;
+            }
+
             auto now = std::chrono::steady_clock::now();
-            if (now >= nextRefresh) {  // refresh so presence never expires
+            bool changed = !sameActivity(a, sent);
+            bool due = now >= nextRefresh;
+            if (changed || due) {
                 nextRefresh = now + std::chrono::seconds(240);
-                if (gLog)
+                if (changed && gLog)
                     std::fprintf(stderr, "[DiscordRPC] presence: %s\n", stateText.c_str());
-                if (!ipc.setActivity(stateText, details, startMs)) {
+                if (!ipc.setActivity(a)) {
                     ipc.disconnect();
                     nextConnect = std::chrono::steady_clock::now();
                     continue;
                 }
+                sent = a;
                 ipc.pump(250);
                 if (gLog && !ipc.lastError().empty())
                     std::fprintf(stderr, "[DiscordRPC] Discord error: %s\n",
                                  ipc.lastError().c_str());
-                writeStateFile(ipc, stateText, details);
+                writeStateFile(ipc, a);
                 continue;
             }
 
@@ -426,6 +568,18 @@ void runPresence() {
                                  ipc.lastError().c_str());
                 backoffSec = 2;
                 nextConnect = std::chrono::steady_clock::now();
+                continue;
+            }
+
+            // ---- handle Join Game requests (friend clicked our Join button) ----
+            if (ipc.lastJoin().valid) {
+                const JoinRequest& r = ipc.lastJoin();
+                if (gLog)
+                    std::fprintf(stderr, "[DiscordRPC] join request: %s (%s)\n",
+                                 r.username.c_str(), r.userId.c_str());
+                writeJoinFile(r, gJoinAddress);
+                if (loaded && r.secret == a.joinSecret) ++pendingJoins;
+                ipc.clearJoin();
             }
         } catch (const std::exception& ex) {
             if (gLog) std::fprintf(stderr, "[DiscordRPC] worker error: %s\n", ex.what());

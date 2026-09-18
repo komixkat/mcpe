@@ -170,8 +170,32 @@ if [ ! -f "$DATA_DIR/discordrpc.conf" ]; then
 # Discord Rich Presence for the launcher/game (custom/mods/discordrpc).
 # 1. Create a Discord application: https://discord.com/developers/applications
 # 2. Copy its Client ID into client_id below.
-# 3. Restart the game with Discord running; see ~/.local/share/mcpelauncher/discordrpc.state.
+# 3. (Optional, logo) In the Developer Portal -> your application -> "Rich
+#    Presence Art Assets" -> upload images, then put the image keys below.
+# 4. Restart the game with Discord running; see ~/.local/share/mcpelauncher/discordrpc.state.
 client_id=
+
+# Show the Minecraft version on the second line (default: just "Playing Minecraft").
+show_version=false
+
+# Art assets. The values are the KEYS you gave your images in the Discord
+# Developer Portal (e.g. "mcpe-logo"); Discord shows the matching artwork.
+large_image=
+large_text=
+small_image=
+small_text=
+
+# Join Game button. While you are inside a world, friends with the same app see
+# a "Join" button on your profile; join requests land in discordrpc.join.
+# join_address is what joiners are told to connect to (e.g. your VPN/LAN IP or
+# a domain with port-forwarding, "1.2.3.4:19132"). Leave empty to just log who
+# wants to join.
+join_enabled=true
+join_max=10
+join_address=
+
+# Label multiplayer worlds: "" (auto-detect external server), "server", or "realm".
+multiplayer=
 EOF
   echo "  OK: created discordrpc.conf (set client_id to enable presence)"
 fi

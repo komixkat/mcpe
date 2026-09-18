@@ -101,19 +101,31 @@ dialog at every launch.
 ## Discord Rich Presence
 
 `mods/discordrpc/` adds rich presence to the launcher/game session: while
-playing, your Discord profile shows **Minecraft Bedrock `<version>`** with the
-state read from the live session:
+playing, your Discord profile shows **Playing Minecraft** with a state that
+tracks what you are doing, pushed to Discord the moment it changes:
 
 - `In the launcher...` while the game process boots,
-- `In the main menu` once it reaches the menu,
-- `Playing - <world name>` while a world is loaded (name parsed from
-  `level.dat`).
+- `In the menus` once it reaches the menu,
+- `In a survival world: <name>` / `In a creative world: <name>` / `In an
+  adventure world: <name>` while a singleplayer world is loaded (name and
+  game mode parsed from `level.dat`; state updates within ~1s),
+- `On a server: <name>` when the game is talking to an external server
+  (auto-detected from live UDP sockets, or forced with `multiplayer=server`),
+- `On a Realm: <name>` with `multiplayer=realm` in the config.
 
 The mod is deliberately free of game-internal hooks: it detects a loaded world
 by watching which `.../minecraftWorlds/<id>/` files the process holds open
 (via `/proc/self/fd`) and talks to Discord over its public unix-socket IPC
 protocol. That means it needs no signature updates and cannot crash the game
 on a future game update (unlike the hook-based mods above).
+
+While you are inside a world the presence also carries a party + join secret,
+so friends get a **Join** button on your profile; requests land in
+`~/.local/share/mcpelauncher/discordrpc.join` and the counter in
+`discordrpc.state` ticks up. Configure `join_address` (your reachable
+LAN/VPN/public address) so joiners see what to connect to. Art assets come
+from your own Discord application — upload them in the Developer Portal and
+reference their keys with `large_image` / `small_image` in the config.
 
 Enable it once (2 minutes, requires your own Discord app ID — Discord shows
 the app's registered name/artwork, which only your own application controls):
@@ -127,4 +139,5 @@ EOF
 Then restart the game with Discord desktop running. Status is written to
 `~/.local/share/mcpelauncher/discordrpc.state`; details and setup notes live
 in `mods/discordrpc/README.md`. `install.sh` seeds a default
-`discordrpc.conf` (with `client_id=` empty) so the file is already in place.
+`discordrpc.conf` (with every key commented, `client_id=` empty) so the file
+is already in place.
