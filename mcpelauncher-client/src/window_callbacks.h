@@ -7,6 +7,7 @@
 #include <chrono>
 #include <vector>
 #include <mutex>
+#include <atomic>
 #include "main.h"
 #ifdef USE_IMGUI
 #include <imgui.h>
@@ -49,6 +50,7 @@ private:
     JniSupport &jniSupport;
     FakeInputQueue &inputQueue;
     std::unordered_map<int, GamepadData> gamepads;
+    std::atomic<float> mouseRelativeScale{1.0f};
     int32_t buttonState = 0;
     KeyCode lastKey = (KeyCode)0;
     size_t lastEnabledNo = 0;
@@ -120,6 +122,10 @@ public:
     void addMouseButtonCallback(void *user, bool (*callback)(void *user, double x, double y, int button, int action));
     void addMousePositionCallback(void *user, bool (*callback)(void *user, double x, double y, bool relative));
     void addMouseScrollCallback(void *user, bool (*callback)(void *user, double x, double y, double dx, double dy));
+
+    // Multiplier applied to relative (locked-mouse) motion deltas before they are
+    // forwarded to the game. Used by mods (e.g. zoom) to dampen look sensitivity.
+    void setMouseRelativeScale(float scale);
 
     void setDelayedPaste();
 

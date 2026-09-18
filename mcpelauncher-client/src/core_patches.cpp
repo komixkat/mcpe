@@ -87,6 +87,10 @@ void CorePatches::loadGameWindowLibrary() {
         handle->callbacks->addMouseScrollCallback(user, callback);
     };
 
+    syms["game_window_set_mouse_relative_scale"] = (void*)+[](GameWindowHandle* handle, float scale) {
+        handle->callbacks->setMouseRelativeScale(scale);
+    };
+
     syms["game_window_add_window_creation_callback"] = (void*)+[](void* user, void (*onCreated)(void* user)) {
         onWindowCreatedCallbacks.emplace_back(std::bind(onCreated, user));
     };

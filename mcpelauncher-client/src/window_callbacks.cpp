@@ -229,6 +229,11 @@ void WindowCallbacks::onMouseRelativePosition(double x, double y) {
             }
             mousePositionCallbacksLock.unlock();
         }
+        float scale = mouseRelativeScale.load(std::memory_order_relaxed);
+        if(scale != 1.0f) {
+            x *= scale;
+            y *= scale;
+        }
         if(useDirectMouseInput)
             Mouse::feed(0, 0, 0, 0, (short)x, (short)y);
         else if(jniSupport.isGameActivityVersion()) {
@@ -237,6 +242,13 @@ void WindowCallbacks::onMouseRelativePosition(double x, double y) {
         } else
             inputQueue.addEvent(FakeMotionEvent(AINPUT_SOURCE_MOUSE_RELATIVE, AMOTION_EVENT_ACTION_HOVER_MOVE, 0, x, y, buttonState, 0));
     }
+}
+
+void WindowCallbacks::setMouseRelativeScale(float scale) {
+    // Only dampening is supported: clamp to (0, 1]. `!(scale > 0)` also catches NaN.
+    if(!(scale > 0.0f) || scale > 1.0f)
+        scale = 1.0f;
+    mouseRelativeScale.store(scale, std::memory_order_relaxed);
 }
 void WindowCallbacks::onMouseScroll(double x, double y, double dx, double dy) {
     if(hasInputMode(InputMode::Mouse)) {
