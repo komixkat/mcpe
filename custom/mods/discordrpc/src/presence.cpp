@@ -48,6 +48,7 @@ properties::property<int> kJoinMax(kConf, "join_max", 10);
 properties::property<std::string> kJoinAddress(kConf, "join_address", "");
 properties::property<std::string> kMultiplayer(kConf, "multiplayer", "");
 properties::property<std::string> kServerName(kConf, "server_name", "");
+properties::property<std::string> kDimension(kConf, "dimension", "");
 
 std::string gClientId;
 std::string gVersion;
@@ -59,6 +60,8 @@ int gJoinMax = 10;
 std::string gJoinAddress;
 std::string gMultiplayer;  // "" (auto) | "server" | "realm"
 std::string gServerName;   // optional: display name for external servers
+std::string gDimensionOverride;  // optional static dimension label (servers/realms)
+int gLastDim = -1;         // last auto-detected world dimension (0/1/2/-1)
 
 // ---------------------------------------------------------------------------
 // small file/string helpers
@@ -436,6 +439,98 @@ struct WorldInfo {
     int gameType = -1;
 };
 
+// ---------------------------------------------------------------------------
+// dimension detection (hook-free, validated on 1.26.51.1)
+//
+// Bedrock keeps a single key in its world leveldb equal to the CURRENT
+// dimension's name ("Overworld", "Nether", "TheEnd") - when the player
+// changes dimension the game writes the new marker. Live
+// writes land in the newest <db>/NNNNNNN.log, so we scan that file (with a
+// size cap) for a key-form occurrence of one of the three names:
+//   [entry-type][keylen==len(name)]name[value-length varint]
+// Content occurrences (e.g. "minecraft:nether_*" strings) do not match the
+// key shape, and only the active dimension's marker is present at a time.
+// Returns 0=Overworld 1=Nether 2=TheEnd, or -1 when nothing reliable.
+// ---------------------------------------------------------------------------
+int probeDimension(const std::string& worldDir) {
+    static const struct {
+        const char* name;
+        int dim;
+    } markers[] = {{"Overworld", 0}, {"Nether", 1}, {"TheEnd", 2}};
+
+    std::string dbDir = worldDir + "/db";
+    DIR* d = opendir(dbDir.c_str());
+    if (!d) return -1;
+    std::string newest;
+    long best = -1;
+    struct dirent* e;
+    while ((e = readdir(d)) != nullptr) {
+        const char* dot = std::strrchr(e->d_name, '.');
+        if (!dot || std::strcmp(dot, ".log") != 0) continue;
+        char* endp = nullptr;
+        long num = std::strtol(e->d_name, &endp, 10);
+        if (endp == e->d_name || *endp != '.') continue;
+        if (num > best) {
+            best = num;
+            newest = std::string(e->d_name);
+        }
+    }
+    closedir(d);
+    if (newest.empty()) return -1;
+
+    std::string path = dbDir + "/" + newest;
+    std::ifstream in(path, std::ios::binary | std::ios::ate);
+    if (!in) return -1;
+    std::streamsize size = in.tellg();
+    if (size <= 0 || size > (8 << 20)) return -1;  // cap at 8 MiB
+    in.seekg(0);
+    std::vector<char> data(static_cast<size_t>(size));
+    if (!in.read(data.data(), size)) return -1;
+
+    int found = -1;
+    size_t bestPos = 0;
+    for (const auto& m : markers) {
+        size_t len = std::strlen(m.name);
+        if (len > 127) continue;
+        size_t pos = 0;
+        while ((pos = std::search(data.begin() + pos, data.end(),
+                                  m.name, m.name + len) -
+                        data.begin()) < data.size()) {
+            // key-form check: [entry-type] [keylen==len] name [vallen varint]
+            if (pos >= 1 && static_cast<unsigned char>(data[pos - 1]) == len) {
+                unsigned char after =
+                    pos + len < data.size() ? static_cast<unsigned char>(data[pos + len]) : 0xff;
+                if (after != 0xff && after < 0x80 && after > 0 &&
+                    !(after >= 0x0a && after <= 0x1f)) {  // not a tag-name length prefix
+                    if (pos > bestPos) {
+                        bestPos = pos;
+                        found = m.dim;
+                    }
+                }
+            }
+            pos += len;
+        }
+    }
+    return found;
+}
+
+std::string dimensionText(int dim) {
+    switch (dim) {
+        case 0: return "Overworld";
+        case 1: return "Nether";
+        case 2: return "The End";
+        default: return "Unknown";
+    }
+}
+
+int dimensionFromOverride(const std::string& value) {
+    std::string v = trim(value);
+    if (v == "0" || v == "overworld" || v == "Overworld") return 0;
+    if (v == "1" || v == "nether" || v == "Nether") return 1;
+    if (v == "2" || v == "end" || v == "the_end" || v == "The End") return 2;
+    return -1;
+}
+
 WorldInfo probeWorld() {
     WorldInfo w;
     w.dir = findOpenWorldDir();
@@ -512,6 +607,8 @@ void writeStateFile(const DiscordIpc& ipc, const Activity& a,
     out << "state=" << a.state << "\n";
     out << "details=" << a.details << "\n";
     out << "world=" << (world.dir.empty() ? std::string("(none)") : world.name) << "\n";
+    out << "dimension=" << (gLastDim >= 0 ? dimensionText(gLastDim)
+                                          : std::string("(auto)")) << "\n";
     out << "multiplayer=" << multiplayer << "\n";
     if (a.partyMax > 0)
         out << "party=" << a.partySize << "/" << a.partyMax << "\n";
@@ -543,6 +640,8 @@ void writeDebugFile(const WorldInfo& world, const NetScan& net,
     out << "world_name=" << (world.dir.empty() ? std::string("(none)") : world.name)
         << "\n";
     out << "game_type=" << world.gameType << "\n";
+    out << "dimension=" << (gLastDim >= 0 ? dimensionText(gLastDim)
+                                           : std::string("(unknown)")) << "\n";
     out << "blob_cache_open=" << (blobCacheOpen() ? "1" : "0") << "\n";
     out << "online=" << (multiplayerOnline() ? "1" : "0") << "\n";
     out << "conf_multiplayer=" << (gMultiplayer.empty() ? std::string("(auto)") : gMultiplayer)
@@ -555,11 +654,13 @@ void writeDebugFile(const WorldInfo& world, const NetScan& net,
 
 }  // namespace
 
-bool presenceInit() {
+// Reloads all config values from discordrpc.conf (applied live every few
+// seconds by runPresence). client_id is intentional: changing it mid-session
+// would drop the Discord connection, so it stays fixed.
+void reloadConfig() {
     try {
         std::ifstream f(kConfPath);
         if (f) kConf.load(f);
-        gClientId = trim(std::string(kClientId.get()));
         gLog = kLogEnabled.get();
         gShowVersion = kShowVersion.get();
         gLargeImage = trim(std::string(kLargeImage.get()));
@@ -572,9 +673,21 @@ bool presenceInit() {
         gMultiplayer = trim(std::string(kMultiplayer.get()));
         if (gMultiplayer != "server" && gMultiplayer != "realm") gMultiplayer.clear();
         gServerName = trim(std::string(kServerName.get()));
+        gDimensionOverride = trim(std::string(kDimension.get()));
     } catch (const std::exception& ex) {
         std::fprintf(stderr, "[DiscordRPC] ignoring bad config: %s\n", ex.what());
     }
+}
+
+bool presenceInit() {
+    try {
+        std::ifstream f(kConfPath);
+        if (f) kConf.load(f);
+        gClientId = trim(std::string(kClientId.get()));
+    } catch (const std::exception& ex) {
+        std::fprintf(stderr, "[DiscordRPC] ignoring bad config: %s\n", ex.what());
+    }
+    reloadConfig();
 
     if (!allDigits(gClientId)) {
         std::fprintf(stderr,
@@ -597,25 +710,43 @@ void runPresence() {
     bool failLogged = false;
     auto nextConnect = std::chrono::steady_clock::now();
     auto nextRefresh = std::chrono::steady_clock::time_point::min();
+    auto lastConfReload = std::chrono::steady_clock::now();
     auto bootStart = std::chrono::steady_clock::now();
     auto lastDebug = std::chrono::steady_clock::now();
+    auto lastDimProbe = std::chrono::steady_clock::time_point::min();
 
     std::string details = gShowVersion ? "Playing Minecraft " + gVersion : "Playing Minecraft";
 
     WorldInfo world;
     int pendingJoins = 0;
     std::string stateText = "In the launcher...";
+    std::string currentStateDetails = details;
     std::string multiplayerMode;
     std::int64_t startMs = nowMs();
     Activity sent;  // last activity that Discord accepted
 
     for (;;) {
         try {
+            // live config: pick up discordrpc.conf edits within ~15 s
+            if (std::chrono::steady_clock::now() - lastConfReload >=
+                std::chrono::seconds(15)) {
+                lastConfReload = std::chrono::steady_clock::now();
+                reloadConfig();
+            }
+
             // ---- sample the game state (always, even while Discord is down) ----
             WorldInfo cur = probeWorld();
             if (cur.dir != world.dir) {  // world opened, changed or closed
                 world = cur;
                 pendingJoins = 0;
+                gLastDim = -1;
+            }
+            if (!world.dir.empty() &&
+                (cur.dir != world.dir ||
+                 std::chrono::steady_clock::now() - lastDimProbe >=
+                     std::chrono::seconds(5))) {
+                lastDimProbe = std::chrono::steady_clock::now();
+                gLastDim = probeDimension(world.dir);
             }
 
             NetScan net = scanNet();
@@ -634,8 +765,15 @@ void runPresence() {
                                  .count();
 
             std::string nextState;
+            std::string currentDetails = details;
             if (!world.dir.empty()) {
-                nextState = worldStateText(world.name, world.gameType);
+                if (gLastDim >= 0) {
+                    nextState = "In the " + dimensionText(gLastDim);
+                    currentDetails =
+                        world.name.empty() ? details : "Playing " + world.name;
+                } else {
+                    nextState = worldStateText(world.name, world.gameType);
+                }
             } else if (online) {
                 if (gMultiplayer == "realm") {
                     nextState = "On a Realm";
@@ -646,12 +784,19 @@ void runPresence() {
                 } else {
                     nextState = "On a server or Realm";
                 }
+                if (!gDimensionOverride.empty()) {
+                    int od = dimensionFromOverride(gDimensionOverride);
+                    if (od >= 0)
+                        currentDetails =
+                            details + " · In the " + dimensionText(od);
+                }
             } else {
                 nextState = (elapsed < 10.0) ? "In the launcher..." : "In the menus";
             }
 
-            if (nextState != stateText) {
+            if (nextState != stateText || currentDetails != currentStateDetails) {
                 stateText = nextState;
+                currentStateDetails = currentDetails;
                 startMs = nowMs();
             }
 
@@ -690,7 +835,7 @@ void runPresence() {
             // ---- assemble the activity (party + join when a world is open) ----
             Activity a;
             a.state = stateText;
-            a.details = details;
+            a.details = currentDetails;
             a.startMs = startMs;
             a.largeImage = gLargeImage;
             a.largeText = gLargeText;

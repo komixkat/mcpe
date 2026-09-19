@@ -98,6 +98,14 @@ are missing, every session is treated as a failed resource load and the game
 shows the "Global Resources Reset — Resources failed to load previously"
 dialog at every launch.
 
+`install.sh` additionally bakes the skin texture into the game's *default*
+skins: the vanilla `skin_packs/vanilla/steve.png` and `alex.png` inside the
+extracted game assets are replaced with `skin/Nekomix/nekomix.png` (originals
+kept as `*.png.bak`). Bedrock always has a default skin even when no pack is
+selected, so the custom skin then shows permanently everywhere — in menus, on
+your own player model, and (client-side) as the default even if a future
+session picks no pack. Re-run `install.sh` after a game-version update.
+
 ## Discord Rich Presence
 
 `mods/discordrpc/` adds rich presence to the launcher/game session: while
@@ -106,15 +114,22 @@ tracks what you are doing, pushed to Discord the moment it changes:
 
 - `In the launcher...` while the game process boots,
 - `In the menus` once it reaches the menu,
-- `In a survival world: <name>` / `In a creative world: <name>` / `In an
-  adventure world: <name>` while a singleplayer world is loaded (name and
-  game mode parsed from `level.dat`; state updates within ~1s),
+- `In the Overworld` / `In the Nether` / `In the End` while a singleplayer
+  world is loaded, with `Playing <world name>` on the second line — the
+  dimension is read straight from the world's leveldb (Bedrock only keeps a
+  marker key named after the *active* dimension), so it updates as you step
+  through a portal. If it cannot be read yet it falls back to `In a survival
+  world: <name>` / `In a creative world: <name>` / etc. (name and game mode
+  parsed from `level.dat`; state updates within ~1s),
 - `On a server` / `On a Realm` while an external server or Realm session is
   live — **auto-detected**: online sessions stream chunks into
   `minecraftpe/blob_cache/` (the mod watches `/proc/self/fd` for exactly one
   of "local world files" or "blob cache log"), so nothing needs configuring.
   Set `multiplayer=server` / `multiplayer=realm` in the config only to pin the
-  exact wording; without it the label is `On a server or Realm`.
+  exact wording; without it the label is `On a server or Realm`. `server_name`
+  adds a name (`On CubeCraft`); `dimension` labels the current dimension for
+  online sessions (which keep no local world to read it from). The config file
+  is re-read live every ~15 seconds, so edits apply without a restart.
 
 The mod is deliberately free of game-internal hooks: it detects a loaded world
 by watching which `.../minecraftWorlds/<id>/` files the process holds open

@@ -153,7 +153,7 @@ if [ -f "$BUNDLE" ]; then
   write_mod_meta "snaplook" "$TAG" "$ABI" '{"metadata":{"name":"Snaplook","description":"Hold a key to snap into an over-the-shoulder view behind your character.","url":"https://github.com/komixkat/mcpe","image":""}}'
   write_mod_meta "zoom" "$TAG" "$ABI" '{"metadata":{"name":"Zoom","description":"Zoom in while playing (hold a key; sensitivity adjustable in the mod config).","url":"https://github.com/komixkat/mcpe","image":""}}'
   write_mod_meta "shulkerpreview" "$TAG" "$ABI" '{"metadata":{"name":"Shulker Preview","description":"Preview the contents of shulker boxes without opening them.","url":"https://github.com/komixkat/mcpe","image":""}}'
-  write_mod_meta "discordrpc" "$TAG" "$ABI" '{"metadata":{"name":"Discord Rich Presence","description":"Shows \"Playing Minecraft\" on your Discord profile with live states: menus, survival/creative worlds, servers and realms, plus an optional Join button while you host a world. Activate by adding your Discord app Client ID to discordrpc.conf.","url":"https://github.com/komixkat/mcpe/blob/qt6/custom/mods/discordrpc/README.md","image":""}}'
+  write_mod_meta "discordrpc" "$TAG" "$ABI" '{"metadata":{"name":"Discord Rich Presence","description":"Shows \"Playing Minecraft\" on your Discord profile with live states: menus, survival/creative worlds (auto-detected dimension: Overworld/Nether/The End), servers and realms, plus an optional Join button while you host a world. Activate by adding your Discord app Client ID to discordrpc.conf.","url":"https://github.com/komixkat/mcpe/blob/qt6/custom/mods/discordrpc/README.md","image":""}}'
 else
   echo "WARNING: $TAG has no $BUNDLE; skipping fixed mods." >&2
 fi
@@ -178,6 +178,29 @@ if [ -f "$OPTIONS" ]; then
 else
   echo "  Note: options.txt does not exist yet; the launcher forces custom"
   echo "        skins on at first launch, so no action is needed."
+fi
+
+# ---------------------------------------------------------------------------
+# Default-skin override: the game bakes "alex" and "steve" as the default
+# skins. Replace both with the custom skin texture so the player's own model
+# shows it permanently, regardless of which default skin is active. Originals
+# are kept as *.png.bak. The versions dir persists across boots, so this only
+# needs to be re-asserted after a game-version update (re-run install.sh).
+# ---------------------------------------------------------------------------
+if [ -f "$SKINROOT/Nekomix/nekomix.png" ]; then
+  VANILLA_STEVE="$(find "$DATA_DIR/versions" -type f \
+    -path '*/skin_packs/vanilla/steve.png' 2>/dev/null | sort | tail -1)"
+  if [ -n "$VANILLA_STEVE" ]; then
+    VANILLA_DIR="$(dirname "$VANILLA_STEVE")"
+    cp -f "$VANILLA_DIR/steve.png" "$VANILLA_DIR/steve.png.bak"
+    cp -f "$VANILLA_DIR/alex.png" "$VANILLA_DIR/alex.png.bak"
+    cp -f "$SKINROOT/Nekomix/nekomix.png" "$VANILLA_DIR/steve.png"
+    cp -f "$SKINROOT/Nekomix/nekomix.png" "$VANILLA_DIR/alex.png"
+    echo "  OK: default skins (alex/steve) overridden with the custom skin"
+  else
+    echo "  Note: game assets not found yet; default-skin override will be"
+    echo "        applied on the next install.sh run after the game exists."
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -220,6 +243,17 @@ join_address=
 # Server/Realm sessions are auto-detected either way (default label:
 # "On a server or Realm"). Leave empty for that default.
 multiplayer=
+
+# Optional label shown for EVERY external server session ("On <name>"). The
+# game keeps no server name on disk that the mod can read, so set this if you
+# mostly play one server (e.g. server_name=CubeCraft). Leave empty for the
+# generic label.
+server_name=
+
+# Optional dimension label for server/Realm sessions, where the game keeps no
+# local world to auto-detect from. Values: Overworld, Nether, The End.
+# Singleplayer worlds detect their dimension automatically; leave empty there.
+dimension=
 EOF
   echo "  OK: created discordrpc.conf (set client_id to enable presence)"
 fi

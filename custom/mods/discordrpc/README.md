@@ -19,6 +19,11 @@ in the same window the launcher's process covers:
 `show_version=true`). The game mode comes from the world's `level.dat`
 `GameType` tag; the world name from `levelname.txt` (or `LevelName`).
 
+When the current dimension can be read from the world database, the state
+becomes **`In the Overworld`** / **`In the Nether`** / **`In the End`** and the
+second line shows `Playing <world name>`. Otherwise you see the mode+name rows
+above.
+
 If you are in a world but Discord still shows "In the menus", the world
 detection only sees *singleplayer* worlds whose files the process holds open —
 join the world in-game for a moment and the state updates within a second.
@@ -45,6 +50,30 @@ Server/realm sessions are detected automatically either way (default label
 while online: `On a server or Realm`); `server_name` is how you show the
 actual server's name, since the fork's network proxy means the name only
 exists inside the game process and cannot be read from disk.
+
+`discordrpc.conf` is **re-read live** (~every 15 seconds), so changing
+`server_name`, `multiplayer`, `dimension` or the artwork keys applies without
+restarting the game.
+
+## Dimensions
+
+Singleplayer worlds detect their current dimension automatically — Bedrock
+keeps a marker key named after the active dimension (`Overworld`, `Nether` or
+`TheEnd`) in the world's leveldb, and only the active one is present. The mod
+reads it from the world's newest log file, so the state updates when you step
+through a portal.
+
+Server and Realm sessions stream the world from the network and keep **no
+local world**, so the dimension cannot be read there. If you want it labelled
+anyway, set it explicitly (also live-reloadable):
+
+```ini
+dimension=Nether    # shows "In the Nether" while online
+```
+
+The `discordrpc.state` file always reports what the mod believes
+(`dimension=` — the auto-detected one for worlds, `(auto)` when none, or the
+override while online).
 
 Note: menus and singleplayer never touch `blob_cache/`, so the detection
 cannot misfire there. While you play a server or realm, the mod also writes
@@ -111,7 +140,8 @@ on game updates and cannot silently join you to strangers.
 ## Verify
 
 While the game runs, `~/.local/share/mcpelauncher/discordrpc.state` shows the
-current status (`connected`, `state`, `details`, `party`, `version`, `error`).
+current status (`connected`, `state`, `details`, `dimension`, `world`,
+`multiplayer`, `party`, `version`, `error`).
 Launcher stderr lines are prefixed `[DiscordRPC]`.
 
 `log=false` in `discordrpc.conf` silences the per-change stderr lines.
