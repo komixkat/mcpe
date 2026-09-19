@@ -31,13 +31,20 @@ its write-ahead log open, whereas singleplayer keeps the world's own files
 open instead. The mod watches `/proc/self/fd` for exactly one of the two — no
 config needed.
 
-Which label is shown depends on the `multiplayer` setting in `discordrpc.conf`:
+Which label is shown depends on the `multiplayer` and `server_name` settings
+in `discordrpc.conf`:
 
 ```ini
-# optional, only if you want the exact wording:
-multiplayer=realm     # shows "On a Realm"  (default: "On a server or Realm")
-multiplayer=server    # shows "On a server" (default: "On a server or Realm")
+# optional, exact wording:
+server_name=CubeCraft   # shows "On CubeCraft" while on that server
+multiplayer=realm       # shows "On a Realm"            (default for realms)
+multiplayer=server      # shows "On a server"           (default for servers)
 ```
+
+Server/realm sessions are detected automatically either way (default label
+while online: `On a server or Realm`); `server_name` is how you show the
+actual server's name, since the fork's network proxy means the name only
+exists inside the game process and cannot be read from disk.
 
 Note: menus and singleplayer never touch `blob_cache/`, so the detection
 cannot misfire there. While you play a server or realm, the mod also writes

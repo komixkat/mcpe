@@ -47,6 +47,7 @@ properties::property<bool> kJoinEnabled(kConf, "join_enabled", true);
 properties::property<int> kJoinMax(kConf, "join_max", 10);
 properties::property<std::string> kJoinAddress(kConf, "join_address", "");
 properties::property<std::string> kMultiplayer(kConf, "multiplayer", "");
+properties::property<std::string> kServerName(kConf, "server_name", "");
 
 std::string gClientId;
 std::string gVersion;
@@ -57,6 +58,7 @@ bool gJoinEnabled = true;
 int gJoinMax = 10;
 std::string gJoinAddress;
 std::string gMultiplayer;  // "" (auto) | "server" | "realm"
+std::string gServerName;   // optional: display name for external servers
 
 // ---------------------------------------------------------------------------
 // small file/string helpers
@@ -569,6 +571,7 @@ bool presenceInit() {
         gJoinAddress = trim(std::string(kJoinAddress.get()));
         gMultiplayer = trim(std::string(kMultiplayer.get()));
         if (gMultiplayer != "server" && gMultiplayer != "realm") gMultiplayer.clear();
+        gServerName = trim(std::string(kServerName.get()));
     } catch (const std::exception& ex) {
         std::fprintf(stderr, "[DiscordRPC] ignoring bad config: %s\n", ex.what());
     }
@@ -619,8 +622,10 @@ void runPresence() {
             bool online = multiplayerOnline();  // server/realm chunk streaming
             multiplayerMode = world.dir.empty()
                                   ? (online
-                                         ? (gMultiplayer.empty() ? "server-or-realm"
-                                                                 : gMultiplayer)
+                                         ? (gMultiplayer == "realm" ? "realm"
+                                            : !gServerName.empty() ? "server:" + gServerName
+                                            : gMultiplayer.empty() ? "server-or-realm"
+                                                                   : gMultiplayer)
                                          : (gMultiplayer.empty() ? "none" : gMultiplayer))
                                   : "world";
 
@@ -632,10 +637,12 @@ void runPresence() {
             if (!world.dir.empty()) {
                 nextState = worldStateText(world.name, world.gameType);
             } else if (online) {
-                if (gMultiplayer == "server") {
-                    nextState = "On a server";
-                } else if (gMultiplayer == "realm") {
+                if (gMultiplayer == "realm") {
                     nextState = "On a Realm";
+                } else if (!gServerName.empty()) {
+                    nextState = "On " + gServerName;
+                } else if (gMultiplayer == "server") {
+                    nextState = "On a server";
                 } else {
                     nextState = "On a server or Realm";
                 }
