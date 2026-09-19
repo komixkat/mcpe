@@ -109,18 +109,20 @@ tracks what you are doing, pushed to Discord the moment it changes:
 - `In a survival world: <name>` / `In a creative world: <name>` / `In an
   adventure world: <name>` while a singleplayer world is loaded (name and
   game mode parsed from `level.dat`; state updates within ~1s),
-- `On a server` while you are not in a single-player world and
-  `multiplayer=server` is set in the config,
-- `On a Realm` the same way with `multiplayer=realm`. (These are config-driven:
-  the launcher proxies all game traffic through its own internal network, so
-  server/realm sessions cannot be auto-detected from sockets; see
-  `mods/discordrpc/README.md`.)
+- `On a server` / `On a Realm` while an external server or Realm session is
+  live — **auto-detected**: online sessions stream chunks into
+  `minecraftpe/blob_cache/` (the mod watches `/proc/self/fd` for exactly one
+  of "local world files" or "blob cache log"), so nothing needs configuring.
+  Set `multiplayer=server` / `multiplayer=realm` in the config only to pin the
+  exact wording; without it the label is `On a server or Realm`.
 
 The mod is deliberately free of game-internal hooks: it detects a loaded world
 by watching which `.../minecraftWorlds/<id>/` files the process holds open
 (via `/proc/self/fd`) and talks to Discord over its public unix-socket IPC
 protocol. That means it needs no signature updates and cannot crash the game
-on a future game update (unlike the hook-based mods above).
+on a future game update (unlike the hook-based mods above). The same
+`/proc/self/fd` watch detects server/realm sessions via the blob-cache
+write-ahead log, so it is just as update-proof.
 
 While you are inside a world the presence also carries a party + join secret,
 so friends get a **Join** button on your profile; requests land in

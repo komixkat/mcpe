@@ -214,9 +214,11 @@ join_enabled=true
 join_max=10
 join_address=
 
-# Label multiplayer without a local world: "" (menus only), "server", or "realm".
-# Set this to what you normally play — while you are NOT in a single-player
-# world the profile shows "On a server" / "On a Realm".
+# Optional exact wording while on an external server / Realm:
+#   multiplayer=server   -> "On a server"
+#   multiplayer=realm    -> "On a Realm"
+# Server/Realm sessions are auto-detected either way (default label:
+# "On a server or Realm"). Leave empty for that default.
 multiplayer=
 EOF
   echo "  OK: created discordrpc.conf (set client_id to enable presence)"

@@ -16,6 +16,7 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <sys/stat.h>
 #include <thread>
 #include <unistd.h>
 #include <vector>
@@ -385,11 +386,13 @@ std::string openDataFds() {
         ssize_t n = readlink(link.c_str(), buf, sizeof(buf) - 1);
         if (n <= 0) continue;
         buf[n] = '\0';
-        if (!std::strstr(buf, "com.mojang") && !std::strstr(buf, "minecraftWorlds"))
+        if (!std::strstr(buf, "com.mojang") && !std::strstr(buf, "minecraftWorlds") &&
+            !std::strstr(buf, "/minecraftpe/"))
             continue;
         if (std::strstr(buf, "/db/") || std::strstr(buf, "level.dat") ||
             std::strstr(buf, "minecraftWorlds") || std::strstr(buf, "/logs/") ||
-            std::strstr(buf, "telemetry") || std::strstr(buf, "catalog")) {
+            std::strstr(buf, "telemetry") || std::strstr(buf, "catalog") ||
+            std::strstr(buf, "blob_cache")) {
             if (!out.empty()) out += ", ";
             out += buf;
         }
@@ -444,6 +447,38 @@ WorldInfo probeWorld() {
     w.name = display;
     w.gameType = ld.second;
     return w;
+}
+
+// True when this process holds a blob_cache fd open. While a server/realm
+// session is live the game streams chunks into minecraftpe/blob_cache/ and
+// keeps its write-ahead log fd open for the whole session; when the session
+// ends the fd is closed. This mirrors findOpenWorldDir(): exactly one of the
+// two is ever active.
+bool blobCacheOpen() {
+    DIR* d = opendir("/proc/self/fd");
+    if (!d) return false;
+    bool open = false;
+    char buf[PATH_MAX];
+    struct dirent* e;
+    while ((e = readdir(d)) != nullptr) {
+        if (!std::isdigit(static_cast<unsigned char>(e->d_name[0]))) continue;
+        std::string link = std::string("/proc/self/fd/") + e->d_name;
+        ssize_t n = readlink(link.c_str(), buf, sizeof(buf) - 1);
+        if (n <= 0) continue;
+        buf[n] = '\0';
+        if (std::strstr(buf, "/minecraftpe/blob_cache/")) {
+            open = true;
+            break;
+        }
+    }
+    closedir(d);
+    return open;
+}
+
+// True when the player is on a server or Realm: no local world open AND the
+// process is streaming chunks into its blob_cache (see above).
+bool multiplayerOnline() {
+    return blobCacheOpen();
 }
 
 std::int64_t nowMs() {
@@ -506,6 +541,8 @@ void writeDebugFile(const WorldInfo& world, const NetScan& net,
     out << "world_name=" << (world.dir.empty() ? std::string("(none)") : world.name)
         << "\n";
     out << "game_type=" << world.gameType << "\n";
+    out << "blob_cache_open=" << (blobCacheOpen() ? "1" : "0") << "\n";
+    out << "online=" << (multiplayerOnline() ? "1" : "0") << "\n";
     out << "conf_multiplayer=" << (gMultiplayer.empty() ? std::string("(auto)") : gMultiplayer)
         << "\n";
     out << "sockets=" << (net.endpoints.empty() ? std::string("(none)") : net.endpoints)
@@ -571,14 +608,61 @@ void runPresence() {
 
     for (;;) {
         try {
+            // ---- sample the game state (always, even while Discord is down) ----
+            WorldInfo cur = probeWorld();
+            if (cur.dir != world.dir) {  // world opened, changed or closed
+                world = cur;
+                pendingJoins = 0;
+            }
+
+            NetScan net = scanNet();
+            bool online = multiplayerOnline();  // server/realm chunk streaming
+            multiplayerMode = world.dir.empty()
+                                  ? (online
+                                         ? (gMultiplayer.empty() ? "server-or-realm"
+                                                                 : gMultiplayer)
+                                         : (gMultiplayer.empty() ? "none" : gMultiplayer))
+                                  : "world";
+
+            double elapsed = std::chrono::duration<double>(
+                                 std::chrono::steady_clock::now() - bootStart)
+                                 .count();
+
+            std::string nextState;
+            if (!world.dir.empty()) {
+                nextState = worldStateText(world.name, world.gameType);
+            } else if (online) {
+                if (gMultiplayer == "server") {
+                    nextState = "On a server";
+                } else if (gMultiplayer == "realm") {
+                    nextState = "On a Realm";
+                } else {
+                    nextState = "On a server or Realm";
+                }
+            } else {
+                nextState = (elapsed < 10.0) ? "In the launcher..." : "In the menus";
+            }
+
+            if (nextState != stateText) {
+                stateText = nextState;
+                startMs = nowMs();
+            }
+
+            // ---- debug dump (calibration; refreshes even if Discord is down) ----
+            auto now = std::chrono::steady_clock::now();
+            if (now - lastDebug >= std::chrono::seconds(5)) {
+                lastDebug = now;
+                writeDebugFile(world, net, stateText);
+            }
+
             if (!ipc.connected()) {
-                auto now = std::chrono::steady_clock::now();
                 if (now < nextConnect) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(250));
                     continue;
                 }
                 nextConnect = now + std::chrono::seconds(backoffSec);
-                if (gLog) std::fprintf(stderr, "[DiscordRPC] connecting to Discord...\n");
+                if (gLog)
+                    std::fprintf(stderr, "[DiscordRPC] connecting to Discord...\n");
                 if (ipc.connect(gClientId)) {
                     backoffSec = 2;
                     failLogged = false;
@@ -594,41 +678,6 @@ void runPresence() {
                     writeStateFile(ipc, sent, world, multiplayerMode);
                     continue;
                 }
-            }
-
-            // ---- sample the game state ----
-            WorldInfo cur = probeWorld();
-            if (cur.dir != world.dir) {  // world opened, changed or closed
-                world = cur;
-                pendingJoins = 0;
-            }
-
-            NetScan net = scanNet();
-            // Multiplayer labels are config-driven (see the scanNet note):
-            // "server" or "realm" in discordrpc.conf. They apply whenever the
-            // player is not in a singleplayer world.
-            multiplayerMode = world.dir.empty()
-                                  ? (gMultiplayer.empty() ? "none" : gMultiplayer)
-                                  : "world";
-
-            double elapsed = std::chrono::duration<double>(
-                                 std::chrono::steady_clock::now() - bootStart)
-                                 .count();
-
-            std::string nextState;
-            if (!world.dir.empty()) {
-                nextState = worldStateText(world.name, world.gameType);
-            } else if (gMultiplayer == "server") {
-                nextState = "On a server";
-            } else if (gMultiplayer == "realm") {
-                nextState = "On a Realm";
-            } else {
-                nextState = (elapsed < 10.0) ? "In the launcher..." : "In the menus";
-            }
-
-            if (nextState != stateText) {
-                stateText = nextState;
-                startMs = nowMs();
             }
 
             // ---- assemble the activity (party + join when a world is open) ----
@@ -647,11 +696,11 @@ void runPresence() {
                 a.joinSecret = gJoinAddress.empty() ? world.id : gJoinAddress;
             }
 
-            auto now = std::chrono::steady_clock::now();
+            auto tnow = std::chrono::steady_clock::now();
             bool changed = !sameActivity(a, sent);
-            bool due = now >= nextRefresh;
+            bool due = tnow >= nextRefresh;
             if (changed || due) {
-                nextRefresh = now + std::chrono::seconds(240);
+                nextRefresh = tnow + std::chrono::seconds(240);
                 if (changed && gLog)
                     std::fprintf(stderr, "[DiscordRPC] presence: %s\n", stateText.c_str());
                 if (!ipc.setActivity(a)) {
@@ -675,12 +724,6 @@ void runPresence() {
                 backoffSec = 2;
                 nextConnect = std::chrono::steady_clock::now();
                 continue;
-            }
-
-            // ---- debug dump (for server/realm calibration) ----
-            if (now - lastDebug >= std::chrono::seconds(5)) {
-                lastDebug = now;
-                writeDebugFile(world, net, stateText);
             }
 
             // ---- handle Join Game requests (friend clicked our Join button) ----

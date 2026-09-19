@@ -11,8 +11,9 @@ in the same window the launcher's process covers:
 | loaded into a creative world                    | `In a creative world: <name>` |
 | loaded into an adventure world                  | `In an adventure world: <name>` |
 | spectating                                       | `Spectating: <name>`          |
-| on a server (`multiplayer=server` in the config)| `On a server`                 |
-| on a Realm (`multiplayer=realm` in the config)  | `On a Realm`                  |
+| on an external server (auto-detected)            | `On a server`                 |
+| on a Realm (auto-detected)                       | `On a Realm`                  |
+| on a server or Realm (detected, mode unknown)    | `On a server or Realm`        |
 
 `details` is just **`Playing Minecraft`** (no version number unless you set
 `show_version=true`). The game mode comes from the world's `level.dat`
@@ -24,19 +25,25 @@ join the world in-game for a moment and the state updates within a second.
 
 ## Servers and Realms
 
-Server/realm detection is **config-driven** because reliable auto-detection is
-impossible in this fork: the launcher proxies every game connection through its
-own internal network, so socket-based checks cannot tell a real server session
-apart from a menu. Set your usual play mode in `discordrpc.conf`:
+Server/realm sessions are **auto-detected**: the game streams chunks into
+`minecraftpe/blob_cache/` (a leveldb) for the whole online session and keeps
+its write-ahead log open, whereas singleplayer keeps the world's own files
+open instead. The mod watches `/proc/self/fd` for exactly one of the two — no
+config needed.
 
-```
-multiplayer=realm     # or server
+Which label is shown depends on the `multiplayer` setting in `discordrpc.conf`:
+
+```ini
+# optional, only if you want the exact wording:
+multiplayer=realm     # shows "On a Realm"  (default: "On a server or Realm")
+multiplayer=server    # shows "On a server" (default: "On a server or Realm")
 ```
 
-The label then shows whenever you are not in a single-player world. While you
-play a server or realm, the mod also writes `~/.local/share/mcpelauncher/
-discordrpc.debug` (open files + live sockets, refreshed every 5s); it costs
-nothing and lets exact auto-detection be calibrated from a real session.
+Note: menus and singleplayer never touch `blob_cache/`, so the detection
+cannot misfire there. While you play a server or realm, the mod also writes
+`~/.local/share/mcpelauncher/discordrpc.debug` every 5s (open files + live
+sockets + blob-cache state) so the label can stay correct across game
+updates.
 
 ## Enable (one-time, ~2 minutes)
 
