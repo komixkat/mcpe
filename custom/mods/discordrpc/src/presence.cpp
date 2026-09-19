@@ -691,6 +691,17 @@ struct CatalogEntry {
     std::string full;    // exact host, e.g. "play.cubecraft.net"
 };
 
+// User-defined host -> name map from discordrpc.conf (server_alias=Name|host,
+// repeatable). Checked before the featured catalog so your own servers win.
+std::vector<CatalogEntry> gAliases;
+
+bool hostMatches(const std::string& host, const CatalogEntry& ce) {
+    const size_t ds = ce.domain.size();
+    return host == ce.full ||
+           (host.size() > ds && host.compare(host.size() - ds, ds, ce.domain) == 0 &&
+            host[host.size() - ds - 1] == '.');
+}
+
 struct ServerDetect {
     std::string name;  // resolved server display name ("" when none)
     std::string kind;  // "server", "realm" or ""
@@ -798,6 +809,40 @@ void parseCatalogFile(const std::string& data, std::vector<CatalogEntry>& out) {
         }
         if (!exact.empty() && !domain.empty())
             out.push_back({name, domain, exact});
+    }
+}
+
+// Parses the repeatable server_alias=Name|host lines from discordrpc.conf so
+// private servers (or any host) get a display name. Mirrors the catalog's
+// host normalization (wildcard, port strip, base domain).
+void loadServerAliases() {
+    gAliases.clear();
+    std::ifstream f(kConfPath);
+    if (!f) return;
+    const std::string key = "server_alias=";
+    std::string line;
+    while (std::getline(f, line)) {
+        line = trim(line);
+        if (line.empty() || line[0] == '#') continue;
+        if (line.compare(0, key.size(), key) != 0) continue;
+        const std::string val = trim(line.substr(key.size()));
+        const size_t bar = val.find('|');
+        if (bar == std::string::npos || bar == 0 || bar + 1 >= val.size()) continue;
+        const std::string name = trim(val.substr(0, bar));
+        std::string host = lowerAscii(trim(val.substr(bar + 1)));
+        if (name.empty() || host.empty()) continue;
+        const size_t colon = host.rfind(':');
+        if (colon != std::string::npos) host = host.substr(0, colon);
+        if (host.size() >= 2 && host[0] == '*' && host[1] == '.')
+            host = host.substr(2);
+        if (host.empty() || host.find('.') == std::string::npos) continue;
+        std::string d = host;
+        const size_t dot = d.find('.');
+        if (dot != std::string::npos) {
+            d = d.substr(dot + 1);
+            if (d.find('.') == std::string::npos) d = host;
+        }
+        gAliases.push_back({name, d, host});
     }
 }
 
@@ -912,12 +957,18 @@ void detectCurrentServer(const std::vector<CatalogEntry>& catalog,
                 if (realmPick.host.empty()) realmPick = t;
                 continue;
             }
+            // user aliases first (their private servers win over the catalog),
+            // then the featured-server catalog
+            for (const auto& ce : gAliases) {
+                if (hostMatches(t.host, ce)) {
+                    out.name = ce.name;
+                    out.kind = "server";
+                    break;
+                }
+            }
+            if (!out.name.empty()) break;
             for (const auto& ce : catalog) {
-                const size_t ds = ce.domain.size();
-                if (t.host == ce.full ||
-                    (t.host.size() > ds &&
-                     t.host.compare(t.host.size() - ds, ds, ce.domain) == 0 &&
-                     t.host[t.host.size() - ds - 1] == '.')) {
+                if (hostMatches(t.host, ce)) {
                     out.name = ce.name;
                     out.kind = "server";
                     break;
@@ -979,6 +1030,10 @@ std::string debugCatalogState() {
     for (size_t i = 0; i < gCatalog.size() && i < 3; ++i)
         out << " [" << gCatalog[i].name << "@" << gCatalog[i].domain << "]";
     if (gCatalog.size() > 3) out << " ...";
+    out << " aliases=" << gAliases.size();
+    for (size_t i = 0; i < gAliases.size() && i < 3; ++i)
+        out << " [" << gAliases[i].name << "@" << gAliases[i].full << "]";
+    if (gAliases.size() > 3) out << " ...";
     return out.str();
 }
 
@@ -1004,6 +1059,7 @@ void reloadConfig() {
         if (gMultiplayer != "server" && gMultiplayer != "realm") gMultiplayer.clear();
         gServerName = trim(std::string(kServerName.get()));
         gDimensionOverride = trim(std::string(kDimension.get()));
+        loadServerAliases();  // repeatable server_alias=Name|host entries
     } catch (const std::exception& ex) {
         std::fprintf(stderr, "[DiscordRPC] ignoring bad config: %s\n", ex.what());
     }

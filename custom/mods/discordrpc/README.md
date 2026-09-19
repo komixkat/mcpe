@@ -65,6 +65,25 @@ presence reads:
 
 `server_name=` / `multiplayer=` above always win over auto-detection.
 
+### Naming your own servers (`server_alias`)
+
+The catalog only covers the featured servers the game ships. For everything
+else — private/custom servers, or a specific sub-server of a network — give
+the hostname a name in `discordrpc.conf` (repeatable, checked with priority
+over the catalog, live-reloaded):
+
+```ini
+# server_alias=<What you want shown>|<host the game resolves>
+server_alias=My Private Server|play.myserver.net
+server_alias=SoulSteel|soulsteel.cubecraft.net
+```
+
+What the game actually resolves is visible in
+`~/.local/share/mcpelauncher/resolved_hosts.log` (also mirrored as
+`resolved=` in `discordrpc.debug`) — use the exact hostname from there.
+A wildcard host works too: `server_alias=My Network|*.myserver.net`.
+Realms need no alias: any `pocket.realms.*` host already reads `On a Realm`.
+
 `discordrpc.conf` is **re-read live** (~every 15 seconds), so changing
 `server_name`, `multiplayer`, `dimension` or the artwork keys applies without
 restarting the game.
