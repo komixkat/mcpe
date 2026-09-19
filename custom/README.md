@@ -109,9 +109,12 @@ tracks what you are doing, pushed to Discord the moment it changes:
 - `In a survival world: <name>` / `In a creative world: <name>` / `In an
   adventure world: <name>` while a singleplayer world is loaded (name and
   game mode parsed from `level.dat`; state updates within ~1s),
-- `On a server: <name>` when the game is talking to an external server
-  (auto-detected from live UDP sockets, or forced with `multiplayer=server`),
-- `On a Realm: <name>` with `multiplayer=realm` in the config.
+- `On a server` while you are not in a single-player world and
+  `multiplayer=server` is set in the config,
+- `On a Realm` the same way with `multiplayer=realm`. (These are config-driven:
+  the launcher proxies all game traffic through its own internal network, so
+  server/realm sessions cannot be auto-detected from sockets; see
+  `mods/discordrpc/README.md`.)
 
 The mod is deliberately free of game-internal hooks: it detects a loaded world
 by watching which `.../minecraftWorlds/<id>/` files the process holds open

@@ -97,6 +97,20 @@ echo "Installing launcher packages: ${PKGS[*]}"
 sudo pacman -U --needed --noconfirm "${PKGS[@]}"
 
 # ---------------------------------------------------------------------------
+# Launcher UI metadata: the launcher's "Installed Mods" tab lists
+# mods/<name>/<ver>/<arch>/mod.json. Without these files the UI shows bare
+# folder names (like "patches") with no description or link. These files are
+# display-only: the game client loads *.so files and ignores everything else.
+# ---------------------------------------------------------------------------
+write_mod_meta() { # name version arch json
+  local name="$1" version="$2" arch="$3" json="$4"
+  local dir="$MODDIR/$name/$version/$arch"
+  install -d "$dir"
+  printf '%s\n' "$json" > "$dir/mod.json"
+  echo "  OK: launcher metadata $dir/mod.json"
+}
+
+# ---------------------------------------------------------------------------
 # Runtime "updates" mod: the PairIP / PlayFab compatibility layer.
 # ---------------------------------------------------------------------------
 echo "Deploying the runtime updates mod ..."
@@ -113,6 +127,7 @@ if [ ! -s "$MODDIR/libmcpelauncher-updates.so" ] \
   exit 1
 fi
 echo "  OK: updates mod -> $MODDIR"
+write_mod_meta "patches" "v1.26.0.2" "x86_64" '{"metadata":{"name":"MCPE Runtime Patches","description":"PlayFab/PairIP compatibility layer that lets recent Minecraft versions (incl. 1.26.x) run on the Linux launcher. Required for online play; leave it installed.","url":"https://github.com/komixkat/mcpe","image":""}}'
 
 # ---------------------------------------------------------------------------
 # Our fixed mods, built for this architecture from this repository.
@@ -134,6 +149,11 @@ if [ -f "$BUNDLE" ]; then
   [ "$backed_up" = 1 ] && echo "  (previous mods backed up to $BACKUP)"
   echo "  OK: mods -> $MODDIR"
   find "$MODDIR" -maxdepth 1 -type f -name 'lib*.so' -printf '      %f\n' | sort
+  write_mod_meta "fullbright" "$TAG" "$ABI" '{"metadata":{"name":"Fullbright","description":"Raises the viewer brightness so dark areas of the world are clearly visible.","url":"https://github.com/komixkat/mcpe","image":""}}'
+  write_mod_meta "snaplook" "$TAG" "$ABI" '{"metadata":{"name":"Snaplook","description":"Hold a key to snap into an over-the-shoulder view behind your character.","url":"https://github.com/komixkat/mcpe","image":""}}'
+  write_mod_meta "zoom" "$TAG" "$ABI" '{"metadata":{"name":"Zoom","description":"Zoom in while playing (hold a key; sensitivity adjustable in the mod config).","url":"https://github.com/komixkat/mcpe","image":""}}'
+  write_mod_meta "shulkerpreview" "$TAG" "$ABI" '{"metadata":{"name":"Shulker Preview","description":"Preview the contents of shulker boxes without opening them.","url":"https://github.com/komixkat/mcpe","image":""}}'
+  write_mod_meta "discordrpc" "$TAG" "$ABI" '{"metadata":{"name":"Discord Rich Presence","description":"Shows \"Playing Minecraft\" on your Discord profile with live states: menus, survival/creative worlds, servers and realms, plus an optional Join button while you host a world. Activate by adding your Discord app Client ID to discordrpc.conf.","url":"https://github.com/komixkat/mcpe/blob/qt6/custom/mods/discordrpc/README.md","image":""}}'
 else
   echo "WARNING: $TAG has no $BUNDLE; skipping fixed mods." >&2
 fi
@@ -194,7 +214,9 @@ join_enabled=true
 join_max=10
 join_address=
 
-# Label multiplayer worlds: "" (auto-detect external server), "server", or "realm".
+# Label multiplayer without a local world: "" (menus only), "server", or "realm".
+# Set this to what you normally play — while you are NOT in a single-player
+# world the profile shows "On a server" / "On a Realm".
 multiplayer=
 EOF
   echo "  OK: created discordrpc.conf (set client_id to enable presence)"

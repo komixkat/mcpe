@@ -11,8 +11,8 @@ in the same window the launcher's process covers:
 | loaded into a creative world                    | `In a creative world: <name>` |
 | loaded into an adventure world                  | `In an adventure world: <name>` |
 | spectating                                       | `Spectating: <name>`          |
-| on an external server                            | `On a server: <name>`         |
-| on a Realm (`multiplayer=realm` in the config)  | `On a Realm: <name>`          |
+| on a server (`multiplayer=server` in the config)| `On a server`                 |
+| on a Realm (`multiplayer=realm` in the config)  | `On a Realm`                  |
 
 `details` is just **`Playing Minecraft`** (no version number unless you set
 `show_version=true`). The game mode comes from the world's `level.dat`
@@ -21,6 +21,22 @@ in the same window the launcher's process covers:
 If you are in a world but Discord still shows "In the menus", the world
 detection only sees *singleplayer* worlds whose files the process holds open —
 join the world in-game for a moment and the state updates within a second.
+
+## Servers and Realms
+
+Server/realm detection is **config-driven** because reliable auto-detection is
+impossible in this fork: the launcher proxies every game connection through its
+own internal network, so socket-based checks cannot tell a real server session
+apart from a menu. Set your usual play mode in `discordrpc.conf`:
+
+```
+multiplayer=realm     # or server
+```
+
+The label then shows whenever you are not in a single-player world. While you
+play a server or realm, the mod also writes `~/.local/share/mcpelauncher/
+discordrpc.debug` (open files + live sockets, refreshed every 5s); it costs
+nothing and lets exact auto-detection be calibrated from a real session.
 
 ## Enable (one-time, ~2 minutes)
 

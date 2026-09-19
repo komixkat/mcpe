@@ -19,7 +19,7 @@ OUT="$HERE/out"
 NDK="${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}"
 if [[ -z "${NDK}" ]]; then
     for candidate in \
-        /home/lua/android-ndk/android-ndk-r27c \
+        /home/lua/mcpe-dev/android-ndk/android-ndk-r27c \
         "$HOME/android-ndk"/android-ndk-* \
         /opt/android-ndk*; do
         if [[ -f "$candidate/build/cmake/android.toolchain.cmake" ]]; then
