@@ -121,15 +121,20 @@ tracks what you are doing, pushed to Discord the moment it changes:
   through a portal. If it cannot be read yet it falls back to `In a survival
   world: <name>` / `In a creative world: <name>` / etc. (name and game mode
   parsed from `level.dat`; state updates within ~1s),
-- `On a server` / `On a Realm` while an external server or Realm session is
-  live — **auto-detected**: online sessions stream chunks into
-  `minecraftpe/blob_cache/` (the mod watches `/proc/self/fd` for exactly one
-  of "local world files" or "blob cache log"), so nothing needs configuring.
-  Set `multiplayer=server` / `multiplayer=realm` in the config only to pin the
-  exact wording; without it the label is `On a server or Realm`. `server_name`
-  adds a name (`On CubeCraft`); `dimension` labels the current dimension for
-  online sessions (which keep no local world to read it from). The config file
-  is re-read live every ~15 seconds, so edits apply without a restart.
+- `On a server` / `On a Realm` (and the server's **name**) while an external
+  server or Realm session is live — **auto-detected**: online sessions stream
+  chunks into `minecraftpe/blob_cache/` (the mod watches `/proc/self/fd` for
+  exactly one of "local world files" or "blob cache log"), so nothing needs
+  configuring. The launcher's libc shim records every hostname the game
+  resolves (`resolved_hosts.log`), and the mod matches the joined server's
+  host against the game's featured-server catalog, so the presence reads
+  `On CubeCraft`, `On The Hive`, etc. automatically, and `On a Realm` for
+  `pocket.realms.*` hosts. Set `multiplayer=server` / `multiplayer=realm` in
+  the config only to pin the exact wording (they override auto-detection);
+  without a match the label is the honest `On a server or Realm`. `server_name`
+  adds a fixed name (`On CubeCraft`); `dimension` labels the current dimension
+  for online sessions (which keep no local world to read it from). The config
+  file is re-read live every ~15 seconds, so edits apply without a restart.
 
 The mod is deliberately free of game-internal hooks: it detects a loaded world
 by watching which `.../minecraftWorlds/<id>/` files the process holds open

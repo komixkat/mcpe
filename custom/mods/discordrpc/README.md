@@ -40,16 +40,30 @@ Which label is shown depends on the `multiplayer` and `server_name` settings
 in `discordrpc.conf`:
 
 ```ini
-# optional, exact wording:
+# optional, exact wording (overrides auto-detection):
 server_name=CubeCraft   # shows "On CubeCraft" while on that server
 multiplayer=realm       # shows "On a Realm"            (default for realms)
 multiplayer=server      # shows "On a server"           (default for servers)
 ```
 
-Server/realm sessions are detected automatically either way (default label
-while online: `On a server or Realm`); `server_name` is how you show the
-actual server's name, since the fork's network proxy means the name only
-exists inside the game process and cannot be read from disk.
+### It auto-detects the actual server name
+
+The launcher's libc shim now records every hostname the game resolves into
+`~/.local/share/mcpelauncher/resolved_hosts.log`, and the mod watches that
+file. When you join a featured server it re-resolves that server's hostname,
+which the mod matches against the featured-server catalog shipped by the game
+(`minecraftpe/ContentCache/ThirdPartyServer/ExperienceManifest` — CubeCraft,
+The Hive, Lifeboat, Mineville, Galaxite, Enchanted, MegaSMP, ...), so the
+presence reads:
+
+- `On <Server Name>` — a server whose host matched the catalog (the label is
+  the name the game itself shows in the Featured Servers list);
+- `On a Realm` — when the game resolves a `pocket.realms.*` host;
+- `On a server or Realm` — when nothing can be named (custom IP servers,
+  opaque proxy relays, or the recorder hasn't seen a repeat yet). This is
+  deliberate: the mod never *guesses* a name it cannot observe.
+
+`server_name=` / `multiplayer=` above always win over auto-detection.
 
 `discordrpc.conf` is **re-read live** (~every 15 seconds), so changing
 `server_name`, `multiplayer`, `dimension` or the artwork keys applies without
@@ -78,8 +92,9 @@ override while online).
 Note: menus and singleplayer never touch `blob_cache/`, so the detection
 cannot misfire there. While you play a server or realm, the mod also writes
 `~/.local/share/mcpelauncher/discordrpc.debug` every 5s (open files + live
-sockets + blob-cache state) so the label can stay correct across game
-updates.
+sockets + blob-cache state + the `resolved=` hostnames it saw and the
+`server_auto=`/`catalog=` detection output) so the label can stay correct
+across game updates.
 
 ## Enable (one-time, ~2 minutes)
 

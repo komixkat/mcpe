@@ -619,6 +619,12 @@ void writeStateFile(const DiscordIpc& ipc, const Activity& a,
     out << "error=" << ipc.lastError() << "\n";
 }
 
+// Debug-dump helpers; definitions live in the detection block below.
+std::string debugServerAuto();
+std::string debugServerKind();
+std::string debugResolvedHosts();
+std::string debugCatalogState();
+
 void writeJoinFile(const JoinRequest& r, const std::string& joinAddress) {
     std::ofstream out(kJoinPath, std::ios::trunc);
     if (!out) return;
@@ -649,7 +655,331 @@ void writeDebugFile(const WorldInfo& world, const NetScan& net,
     out << "sockets=" << (net.endpoints.empty() ? std::string("(none)") : net.endpoints)
         << "\n";
     out << "data_fds=" << openDataFds() << "\n";
+    out << "server_auto=" << debugServerAuto() << "\n";
+    out << "server_kind=" << debugServerKind() << "\n";
+    out << "resolved=" << debugResolvedHosts() << "\n";
+    out << "catalog=" << debugCatalogState() << "\n";
     out << "label=" << label << "\n";
+}
+
+// ---------------------------------------------------------------------------
+// server & realm auto-detection (reads what the game actually connects to)
+//
+// The launcher's libc shim records every hostname the game resolves into
+// resolved_hosts.log in the same data dir. When we are online without a local
+// world (third-party server / realm), we look at the most recent hostnames
+// and:
+//   - match them against the featured-server catalog (on disk at
+//     ContentCache/ThirdPartyServer/ExperienceManifest) -> server name
+//   - pocket.realms.* -> Realm
+// This only names what we can actually observe; anything else (no recorder
+// yet, opaque relay hosts, ...) falls back to the generic label and config
+// overrides. All parsing is defensive and tolerate failures.
+// ---------------------------------------------------------------------------
+constexpr const char* kResolvedHostsPath =
+    "/data/data/com.mojang.minecraftpe/resolved_hosts.log";
+constexpr const char* kCatalogDir =
+    "/data/data/com.mojang.minecraftpe/minecraftpe/ContentCache/ThirdPartyServer/"
+    "ExperienceManifest";
+constexpr long long kResolvedHostsWindowSec = 300;    // consider last 5 min
+constexpr long long kHostsReadEveryMs = 3000;         // reread log at most every 3 s
+constexpr long long kCatalogReloadSec = 60;           // refresh catalog every 60 s
+
+struct CatalogEntry {
+    std::string name;
+    std::string domain;  // base domain, e.g. "cubecraft.net"
+    std::string full;    // exact host, e.g. "play.cubecraft.net"
+};
+
+struct ServerDetect {
+    std::string name;  // resolved server display name ("" when none)
+    std::string kind;  // "server", "realm" or ""
+    std::string hosts; // debug only: recent hostnames considered
+};
+
+std::string lowerAscii(const std::string& in) {
+    std::string out;
+    out.reserve(in.size());
+    for (char c : in)
+        out += (c >= 'A' && c <= 'Z') ? static_cast<char>(c + 32) : c;
+    return out;
+}
+
+// Reads a JSON string starting at `open` (the opening quote). Returns the raw
+// content (escape pairs preserved) and sets `end` to the closing quote index.
+std::string readJsonStringAt(const std::string& s, size_t open, size_t& end) {
+    std::string out;
+    size_t i = open + 1;
+    while (i < s.size() && s[i] != '"') {
+        if (s[i] == '\\' && i + 1 < s.size()) {
+            out += s[i];
+            out += s[i + 1];
+            i += 2;
+        } else {
+            out += s[i++];
+        }
+    }
+    end = i;
+    return out;
+}
+
+// Pull (name, hosts) out of a featured-server catalog manifest. The payload
+// is a JSON array of catalog items; each 3PP item carries a
+// "Title":{"NEUTRAL":...} plus DisplayProperties "url"/"whitelistUrl"/
+// "allowListUrl" hosts. Everything here is best-effort: a schema change just
+// yields a smaller/empty catalog and the RPC falls back to generic labels.
+void parseCatalogFile(const std::string& data, std::vector<CatalogEntry>& out) {
+    const std::string itemSep = "\"ContentType\":\"3PP_V2.0\"";
+    const std::string titleKey = "\"Title\":{\"NEUTRAL\":\"";
+    const std::string titleKeyLow = "\"Title\":{\"neutral\":\"";
+    const char* urlKeys[] = {"\"url\":\"", "\"whitelistUrl\":\"",
+                             "\"allowListUrl\":\""};
+
+    std::vector<std::string> hosts;  // reused per item
+    size_t pos = 0;
+    while ((pos = data.find(itemSep, pos)) != std::string::npos) {
+        const size_t itemStart = pos;
+        pos += itemSep.size();
+        size_t itemEnd = data.find(itemSep, pos);
+        if (itemEnd == std::string::npos) itemEnd = data.size();
+
+        std::string name;
+        size_t t = data.find(titleKey, itemStart);
+        if (t != std::string::npos && t < itemEnd) {
+            size_t e = 0;
+            name = readJsonStringAt(data, t + titleKey.size() - 1, e);
+        } else {
+            t = data.find(titleKeyLow, itemStart);
+            if (t != std::string::npos && t < itemEnd) {
+                size_t e = 0;
+                name = readJsonStringAt(data, t + titleKeyLow.size() - 1, e);
+            }
+        }
+        name = trim(name);
+        if (name.empty()) continue;
+
+        hosts.clear();
+        std::string exact;
+        std::string domain;
+        for (const char* key : urlKeys) {
+            const size_t keyLen = std::strlen(key);
+            size_t p = itemStart;
+            while (p < itemEnd &&
+                   (p = data.find(key, p)) != std::string::npos && p < itemEnd) {
+                size_t e = 0;
+                std::string v =
+                    trim(readJsonStringAt(data, p + keyLen - 1, e));
+                p += keyLen;
+                if (v.empty()) continue;
+                // keep only the host part (strip scheme / path)
+                const size_t sl = v.find("://");
+                const size_t hostStart = (sl == std::string::npos) ? 0 : sl + 3;
+                size_t hostEnd = v.find('/', hostStart);
+                if (hostEnd == std::string::npos) hostEnd = v.size();
+                std::string host =
+                    lowerAscii(v.substr(hostStart, hostEnd - hostStart));
+                const size_t colon = host.rfind(':');
+                if (colon != std::string::npos) host = host.substr(0, colon);
+                if (host.empty() || host.find('.') == std::string::npos) continue;
+                if (host.size() >= 2 && host[0] == '*' && host[1] == '.')
+                    host = host.substr(2);  // allow-list wildcard
+                if (exact.empty()) exact = host;
+
+                // base domain = last two labels
+                std::string d = host;
+                size_t dot = d.find('.');
+                if (dot != std::string::npos) {
+                    d = d.substr(dot + 1);
+                    if (d.find('.') == std::string::npos) d = host;
+                }
+                if (domain.empty() || host == exact) domain = d;
+                hosts.push_back(host);
+            }
+        }
+        if (!exact.empty() && !domain.empty())
+            out.push_back({name, domain, exact});
+    }
+}
+
+void loadServerCatalog(std::vector<CatalogEntry>& out) {
+    DIR* d = opendir(kCatalogDir);
+    if (!d) return;
+    struct dirent* e;
+    while ((e = readdir(d)) != nullptr) {
+        const std::string fn = e->d_name;
+        if (fn == "." || fn == "..") continue;
+        const std::string path = std::string(kCatalogDir) + "/" + fn;
+        struct stat st;
+        if (stat(path.c_str(), &st) != 0 || st.st_size <= 0 ||
+            st.st_size > (8 << 20))
+            continue;
+        std::ifstream in(path, std::ios::binary);
+        if (!in) continue;
+        std::string data((std::istreambuf_iterator<char>(in)),
+                         std::istreambuf_iterator<char>());
+        parseCatalogFile(data, out);
+    }
+    closedir(d);
+}
+
+// Read the tail of resolved_hosts.log; returns (ts, host) pairs within the
+// window, newest first. Missing file (old client without the recorder) yields
+// an empty list which just means "no auto-detection".
+std::vector<std::pair<long long, std::string>> readResolvedHosts() {
+    std::vector<std::pair<long long, std::string>> out;
+    std::ifstream in(kResolvedHostsPath, std::ios::binary | std::ios::ate);
+    if (!in) return out;
+    const std::streamoff size = in.tellg();
+    if (size <= 0) return out;
+    const std::streamoff tailCap = 64 * 1024;
+    in.seekg(size > tailCap ? size - tailCap : 0);
+    const long long now = nowMs() / 1000;
+    std::string line;
+    while (std::getline(in, line)) {
+        std::istringstream ss(line);
+        long long ts = 0;
+        std::string host;
+        if (!(ss >> ts >> host)) continue;
+        if (host.empty() || now - ts > kResolvedHostsWindowSec) continue;
+        out.emplace_back(ts, host);
+    }
+    std::reverse(out.begin(), out.end());  // newest first
+    return out;
+}
+
+// Classifies the current session from recent resolved hostnames. Catalog
+// matches win (a real server), then Realm markers; else nothing detected.
+//
+// Discriminator: the game pings every featured host once per server-list
+// refresh, but the server the player is actually on gets re-resolved (join +
+// connection upkeep). So we prefer hostnames that were resolved at least
+// twice within the window, newest first, and fall back to the newest single
+// resolution when nothing repeats yet.
+void detectCurrentServer(const std::vector<CatalogEntry>& catalog,
+                         const std::vector<std::pair<long long, std::string>>& hosts,
+                         ServerDetect& out) {
+    out = ServerDetect{};
+    if (hosts.empty()) return;
+
+    // tally each host: newest resolution timestamp + occurrence count
+    struct Tally {
+        std::string host;
+        long long lastTs;
+        int count;
+    };
+    std::vector<Tally> tally;
+    for (const auto& hp : hosts) {
+        std::string h = lowerAscii(hp.second);
+        if (!h.empty() && h.back() == '.') h.pop_back();
+        if (h.empty()) continue;
+        bool found = false;
+        for (auto& t : tally) {
+            if (t.host == h) {
+                if (hp.first > t.lastTs) t.lastTs = hp.first;
+                ++t.count;
+                found = true;
+                break;
+            }
+        }
+        if (!found) tally.push_back({h, hp.first, 1});
+    }
+
+    // debug list, newest first, with repeat counts so the calibration data
+    // shows which host the game keeps re-resolving (the active server).
+    const auto newestFirst = [](const Tally& a, const Tally& b) { return a.lastTs > b.lastTs; };
+    std::sort(tally.begin(), tally.end(), newestFirst);
+    std::string seen;
+    for (const auto& t : tally) {
+        if (!seen.empty()) seen += ", ";
+        seen += t.host;
+        if (t.count > 1) seen += "(x" + std::to_string(t.count) + ")";
+    }
+
+    // The client pings every featured host once per server-list refresh, but
+    // re-resolves the server it is actually on (join + connection upkeep).
+    // Pass 0: hosts resolved 2+ times (the active server). Pass 1: everything
+    // else (fresh join where only a single resolution has happened yet).
+    // A catalog match always wins over the Realm marker.
+    Tally realmPick;
+    for (int pass = 0; pass < 2 && out.name.empty(); ++pass) {
+        std::vector<Tally> cands;
+        for (const auto& t : tally)
+            if ((pass == 0 && t.count > 1) || (pass == 1 && t.count == 1)) cands.push_back(t);
+        if (cands.empty()) continue;
+        std::sort(cands.begin(), cands.end(), newestFirst);
+        for (const auto& t : cands) {
+            if (t.host.find("pocket.realms") != std::string::npos) {
+                if (realmPick.host.empty()) realmPick = t;
+                continue;
+            }
+            for (const auto& ce : catalog) {
+                const size_t ds = ce.domain.size();
+                if (t.host == ce.full ||
+                    (t.host.size() > ds &&
+                     t.host.compare(t.host.size() - ds, ds, ce.domain) == 0 &&
+                     t.host[t.host.size() - ds - 1] == '.')) {
+                    out.name = ce.name;
+                    out.kind = "server";
+                    break;
+                }
+            }
+            if (!out.name.empty()) break;
+        }
+    }
+    if (out.name.empty() && !realmPick.host.empty()) out.kind = "realm";
+    out.hosts = seen;
+}
+
+// Cached copies + refresh cadence for the catalog and host list.
+std::vector<CatalogEntry> gCatalog;
+long long gCatalogLoadedAt = 0;
+std::vector<std::pair<long long, std::string>> gLastHosts;
+long long gHostsReadAt = 0;
+
+void detectServer(ServerDetect& out) {
+    const long long now = nowMs();
+    if (now - gCatalogLoadedAt > kCatalogReloadSec * 1000) {
+        gCatalog.clear();
+        loadServerCatalog(gCatalog);
+        gCatalogLoadedAt = now;
+        // The game rewrites the manifest while we may be mid-read (or it is
+        // still downloading); a transient empty load must not stick for a full
+        // refresh interval - retry within a few seconds instead.
+        if (gCatalog.empty())
+            gCatalogLoadedAt -= (kCatalogReloadSec - 5) * 1000;
+    }
+    if (now - gHostsReadAt > kHostsReadEveryMs) {
+        gLastHosts = readResolvedHosts();
+        gHostsReadAt = now;
+    }
+    detectCurrentServer(gCatalog, gLastHosts, out);
+}
+
+std::string debugServerAuto() {
+    ServerDetect det;
+    detectServer(det);
+    return det.name.empty() ? std::string("(none)") : det.name;
+}
+
+std::string debugServerKind() {
+    ServerDetect det;
+    detectServer(det);
+    return det.kind.empty() ? std::string("(none)") : det.kind;
+}
+
+std::string debugResolvedHosts() {
+    ServerDetect det;
+    detectServer(det);
+    return det.hosts.empty() ? std::string("(none)") : det.hosts;
+}
+
+std::string debugCatalogState() {
+    std::ostringstream out;
+    out << "dir=" << kCatalogDir << " entries=" << gCatalog.size();
+    for (size_t i = 0; i < gCatalog.size() && i < 3; ++i)
+        out << " [" << gCatalog[i].name << "@" << gCatalog[i].domain << "]";
+    if (gCatalog.size() > 3) out << " ...";
+    return out.str();
 }
 
 }  // namespace
@@ -751,10 +1081,16 @@ void runPresence() {
 
             NetScan net = scanNet();
             bool online = multiplayerOnline();  // server/realm chunk streaming
+            ServerDetect detected;
+            if (online && world.dir.empty()) detectServer(detected);
             multiplayerMode = world.dir.empty()
                                   ? (online
                                          ? (gMultiplayer == "realm" ? "realm"
                                             : !gServerName.empty() ? "server:" + gServerName
+                                            : gMultiplayer == "server" ? "server"
+                                            : !detected.name.empty()
+                                                  ? "server:" + detected.name
+                                            : detected.kind == "realm" ? "realm"
                                             : gMultiplayer.empty() ? "server-or-realm"
                                                                    : gMultiplayer)
                                          : (gMultiplayer.empty() ? "none" : gMultiplayer))
@@ -781,6 +1117,10 @@ void runPresence() {
                     nextState = "On " + gServerName;
                 } else if (gMultiplayer == "server") {
                     nextState = "On a server";
+                } else if (!detected.name.empty()) {
+                    nextState = "On " + detected.name;
+                } else if (detected.kind == "realm") {
+                    nextState = "On a Realm";
                 } else {
                     nextState = "On a server or Realm";
                 }

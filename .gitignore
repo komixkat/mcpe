@@ -10,3 +10,4 @@ custom/mods/out/
 custom/mods/*/build-*/
 custom/mods/*/build/
 custom/mods/*/cpm-cache/
+build-*/
