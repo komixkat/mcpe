@@ -393,6 +393,19 @@ bool DiscordIpc::setActivity(const Activity& a) {
     }
     if (!a.joinSecret.empty())
         act += "\"secrets\":{\"join\":\"" + jsonEscape(a.joinSecret) + "\"},";
+    if (!a.buttons.empty()) {
+        act += "\"buttons\":[";
+        size_t n = 0;
+        for (const auto& btn : a.buttons) {
+            if (btn.label.empty() || btn.url.empty()) continue;
+            if (n >= 2) break;  // Discord supports at most two buttons
+            if (n > 0) act += ",";
+            act += "{\"label\":\"" + jsonEscape(btn.label) + "\",\"url\":\"" +
+                   jsonEscape(btn.url) + "\"}";
+            ++n;
+        }
+        act += "],";
+    }
     act += "\"instance\":true,\"type\":0}";
 
     std::string payload = "{\"cmd\":\"SET_ACTIVITY\",\"args\":{\"pid\":" +

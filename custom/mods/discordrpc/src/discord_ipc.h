@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 // Minimal Discord Rich Presence IPC client.
 //
@@ -13,6 +14,13 @@
 // Everything is synchronous and fail-closed: every socket error is reported as
 // a failure and the caller reconnects with backoff (Discord itself is not
 // always running when the game is).
+
+// A single Discord activity button (a plain link rendered under the
+// activity). No more than 2 are sent; Discord drops anything beyond that.
+struct Button {
+    std::string label;  // <= 32 chars
+    std::string url;    // must be http(s)://
+};
 
 // Everything that can go into a SET_ACTIVITY payload. Empty strings / zero
 // sizes are omitted from the JSON so only configured fields are sent.
@@ -27,6 +35,7 @@ struct Activity {
     int partySize = 0;
     int partyMax = 0;
     std::string joinSecret;
+    std::vector<Button> buttons;
 };
 
 // A friend clicked "Join Game" on our profile. Filled by pump().

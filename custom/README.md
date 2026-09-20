@@ -108,57 +108,18 @@ session picks no pack. Re-run `install.sh` after a game-version update.
 
 ## Discord Rich Presence
 
-`mods/discordrpc/` adds rich presence to the launcher/game session: while
-playing, your Discord profile shows **Playing Minecraft** with a state that
-tracks what you are doing, pushed to Discord the moment it changes:
+`mods/discordrpc/` adds minimal rich presence to the launcher/game session:
+while playing, your Discord profile shows **`Playing Minecraft`** with an
+elapsed timer and a single **`Join komixkat`** button that opens the Minecraft
+profile page (`https://launch.minecraft.net/profile/komixkat`).
 
-- `In the launcher...` while the game process boots,
-- `In the menus` once it reaches the menu,
-- `In the Overworld` / `In the Nether` / `In the End` while a singleplayer
-  world is loaded, with `Playing <world name>` on the second line — the
-  dimension is read straight from the world's leveldb (Bedrock only keeps a
-  marker key named after the *active* dimension), so it updates as you step
-  through a portal. If it cannot be read yet it falls back to `In a survival
-  world: <name>` / `In a creative world: <name>` / etc. (name and game mode
-  parsed from `level.dat`; state updates within ~1s),
-- `On a server` / `On a Realm` (with the actual **name**, e.g. `On SoulSteel`
-  or the Realm's title) while an external server or Realm session is live —
-  **auto-detected**: online sessions stream chunks into
-  `minecraftpe/blob_cache/` (the mod watches `/proc/self/fd` for exactly one
-  of "local world files" or "blob cache log"), so nothing needs configuring.
-  The launcher's libc shim records every hostname the game resolves
-  (`resolved_hosts.log`); the mod uses the host the game is connected to as a
-  memory anchor and reads the display name the game keeps next to it in its
-  own memory (it runs inside the game process, so no hooks or ptrace needed).
-  This works on featured servers, custom IP servers and Realms alike
-  (falling back to the featured-server catalog, then the honest
-  `On a server or Realm` when nothing trustworthy is found). The second line
-  can also carry your **IGN** (read from memory, `show_ign=true`).
-  Set `multiplayer=server` / `multiplayer=realm` in the config only to pin
-  the exact wording (they override auto-detection); `server_name` adds a
-  fixed name; `dimension` labels the current dimension for online sessions
-  (which keep no local world — but the mod also tries a best-effort in-session
-  dimension read, logged as `server_dim=`). The config file is re-read live
-  every ~15 seconds, so edits apply without a restart. Full details in
-  `mods/discordrpc/README.md`.
+That is all it does — deliberately. No server/realm names, no dimensions, no
+in-game name: nothing is scanned or detected from the game, so the presence
+cannot show wrong text, stall, or freeze your session.
 
-The mod is deliberately free of game-internal hooks: it detects a loaded world
-by watching which `.../minecraftWorlds/<id>/` files the process holds open
-(via `/proc/self/fd`) and talks to Discord over its public unix-socket IPC
-protocol. That means it needs no signature updates and cannot crash the game
-on a future game update (unlike the hook-based mods above). The same
-`/proc/self/fd` watch detects server/realm sessions via the blob-cache
-write-ahead log, so it is just as update-proof.
-
-While you are inside a world **or Realm** the presence also carries a party +
-join secret, so friends get a **Join** button on your profile; requests land in
-`~/.local/share/mcpelauncher/discordrpc.join` and the counter in
-`discordrpc.state` ticks up. **Press `F8` in-game to toggle join on/off**
-(saved to `join_enabled` in the config). Configure `join_address` (your
-reachable LAN/VPN/public address) so joiners see what to connect to. Art
-assets come from your own Discord application — upload them in the Developer
-Portal and reference their keys with `large_image` / `small_image` in the
-config.
+The mod is free of game-internal hooks by construction: it is just a unix
+socket client of Discord's public IPC protocol, with no signatures and nothing
+to break on a game update.
 
 Enable it once (2 minutes, requires your own Discord app ID — Discord shows
 the app's registered name/artwork, which only your own application controls):
@@ -169,8 +130,9 @@ client_id=PASTE_YOUR_DISCORD_APPLICATION_CLIENT_ID
 EOF
 ```
 
-Then restart the game with Discord desktop running. Status is written to
-`~/.local/share/mcpelauncher/discordrpc.state`; details and setup notes live
-in `mods/discordrpc/README.md`. `install.sh` seeds a default
-`discordrpc.conf` (with every key commented, `client_id=` empty) so the file
-is already in place.
+Then restart the game with Discord desktop running. Art assets come from your
+own Discord application — upload them in the Developer Portal and reference
+the key with `large_image` in the config. Setup notes live in
+`mods/discordrpc/README.md`. `install.sh` seeds a default `discordrpc.conf`
+(with every key commented, `client_id=` empty) so the file is already in
+place.
