@@ -6,19 +6,24 @@
 #include <cctype>
 #include <chrono>
 #include <climits>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <dirent.h>
+#include <dlfcn.h>
 #include <exception>
+#include <fcntl.h>
 #include <fstream>
 #include <iterator>
 #include <memory>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <sys/stat.h>
 #include <thread>
 #include <unistd.h>
+#include <utility>
 #include <vector>
 
 #include <properties/property.h>
@@ -49,6 +54,7 @@ properties::property<std::string> kJoinAddress(kConf, "join_address", "");
 properties::property<std::string> kMultiplayer(kConf, "multiplayer", "");
 properties::property<std::string> kServerName(kConf, "server_name", "");
 properties::property<std::string> kDimension(kConf, "dimension", "");
+properties::property<bool> kShowIgn(kConf, "show_ign", true);
 
 std::string gClientId;
 std::string gVersion;
@@ -62,6 +68,16 @@ std::string gMultiplayer;  // "" (auto) | "server" | "realm"
 std::string gServerName;   // optional: display name for external servers
 std::string gDimensionOverride;  // optional static dimension label (servers/realms)
 int gLastDim = -1;         // last auto-detected world dimension (0/1/2/-1)
+bool gShowIgn = true;      // show the player's IGN (from in-memory profile scan)
+
+// In-process memory-scan state (results cached; the scan itself is bounded):
+struct ScanResult {
+    std::string anchor;  // what we searched for (hostname / XUID)
+    std::string name;    // best UTF-16 string found near the anchor
+    std::string debug;   // candidate list for calibration
+    long long atMs = 0;
+};
+ScanResult gServerScan, gIgnScan;
 
 // ---------------------------------------------------------------------------
 // small file/string helpers
@@ -624,6 +640,10 @@ std::string debugServerAuto();
 std::string debugServerKind();
 std::string debugResolvedHosts();
 std::string debugCatalogState();
+std::string debugServerAnchor();
+std::string debugServerScan();
+std::string debugIgn();
+std::string debugServerDim();
 
 void writeJoinFile(const JoinRequest& r, const std::string& joinAddress) {
     std::ofstream out(kJoinPath, std::ios::trunc);
@@ -659,6 +679,10 @@ void writeDebugFile(const WorldInfo& world, const NetScan& net,
     out << "server_kind=" << debugServerKind() << "\n";
     out << "resolved=" << debugResolvedHosts() << "\n";
     out << "catalog=" << debugCatalogState() << "\n";
+    out << "server_anchor=" << debugServerAnchor() << "\n";
+    out << "server_scan=" << debugServerScan() << "\n";
+    out << "server_dim=" << debugServerDim() << "\n";
+    out << "ign=" << debugIgn() << "\n";
     out << "label=" << label << "\n";
 }
 
@@ -703,9 +727,11 @@ bool hostMatches(const std::string& host, const CatalogEntry& ce) {
 }
 
 struct ServerDetect {
-    std::string name;  // resolved server display name ("" when none)
-    std::string kind;  // "server", "realm" or ""
-    std::string hosts; // debug only: recent hostnames considered
+    std::string name;    // resolved server display name ("" when none)
+    std::string kind;    // "server", "realm" or ""
+    std::string hosts;   // debug only: recent hostnames considered
+    std::string anchor;  // debug only: hostname used as memory-scan anchor
+    std::string scan;    // debug only: what the in-memory scan found near anchor
 };
 
 std::string lowerAscii(const std::string& in) {
@@ -846,6 +872,467 @@ void loadServerAliases() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// in-process memory scans (signature-free: the mod shares the game's address
+// space, so it can read what the game itself keeps in memory - the connected
+// server's display name, realm titles, the player's IGN, and dimensions).
+//
+// We anchor on strings we already know exist ("mco.cubecraft.net", the XUID
+// of the logged-in account) and harvest human-readable UTF-16 strings near
+// them - Bedrock stores UI strings as UTF-16, and a server/realm item keeps
+// its display name next to its address in many builds. Strict filtering
+// keeps false positives out; results are logged for calibration.
+// ---------------------------------------------------------------------------
+constexpr int kMemWindowBytes = 32768;        // look ±32 KiB around each hit
+constexpr long long kMemScanEveryMs = 20000;  // at most one scan / 20 s
+constexpr size_t kMemScanByteBudget = 2ull << 30;  // byte budget per scan
+
+struct MemRegion {
+    uintptr_t start, end;
+};
+
+static std::vector<MemRegion> readMemRegions() {
+    std::vector<MemRegion> out;
+    std::ifstream maps("/proc/self/maps");
+    std::string line;
+    while (std::getline(maps, line)) {
+        uintptr_t start = 0, end = 0;
+        std::string perms, name;
+        char dash = 0;
+        std::istringstream ss(line);
+        if (!(ss >> std::hex >> start >> dash >> std::hex >> end)) continue;
+        if (!(ss >> perms)) continue;
+        long off = 0;
+        std::string dev;
+        long ino = 0;
+        ss >> std::dec >> off >> dev >> ino;
+        std::getline(ss, name);
+        name = trim(name);
+        if (perms.empty() || perms[0] != 'r') continue;
+        // only writable anonymous memory + [heap]: that's where server items,
+        // profile data and UI strings actually live. Skip stacks, vvar/vdso,
+        // code, and huge file-backed mappings (world data, packs).
+        if (name == "[heap]") {
+            out.push_back({start, end});
+        } else if (name.empty() && perms.size() >= 2 && perms[1] == 'w') {
+            if (end - start <= (2ull << 30)) out.push_back({start, end});
+        }
+    }
+    return out;
+}
+
+// Converts a UTF-16LE code-unit run to UTF-8 (basic planes; skips surrogates).
+static void appendU16ToUtf8(const std::vector<char>& buf, size_t start,
+                            size_t n, std::string& out) {
+    for (size_t i = 0; i < n; ++i) {
+        const char16_t c = static_cast<unsigned char>(buf[start + i * 2]) |
+                           (static_cast<unsigned char>(buf[start + i * 2 + 1]) << 8);
+        if (c >= 0xD800 && c <= 0xDFFF) continue;  // surrogate halves
+        if (c < 0x80) {
+            out += static_cast<char>(c);
+        } else if (c < 0x800) {
+            out += static_cast<char>(0xC0 | (c >> 6));
+            out += static_cast<char>(0x80 | (c & 0x3F));
+        } else {
+            out += static_cast<char>(0xE0 | (c >> 12));
+            out += static_cast<char>(0x80 | ((c >> 6) & 0x3F));
+            out += static_cast<char>(0x80 | (c & 0x3F));
+        }
+    }
+}
+
+struct ScanHit {
+    std::string text;  // UTF-8
+    int minDist = 0;   // closest distance to an anchor hit (bytes)
+    int count = 0;     // number of anchor hits whose window produced it
+};
+
+// Raw hits of the most recent server-anchor scan (reused by the dimension
+// probe so the heap is only ever scanned once per refresh window).
+std::vector<ScanHit> gRawHits;
+std::string gRawAnchor;
+long long gRawAt = 0;
+
+// Scans the writable heap for the anchor (as ASCII and as UTF-16LE) and
+// collects printable UTF-16 strings inside a window around each occurrence.
+static std::vector<ScanHit> collectScanHits(const std::string& anchor) {
+    std::vector<ScanHit> hits;
+    if (anchor.empty()) return hits;
+    std::string p16;
+    p16.reserve(anchor.size() * 2);
+    for (char c : anchor) {
+        p16.push_back(c);
+        p16.push_back('\0');
+    }
+    int memFd = ::open("/proc/self/mem", O_RDONLY);
+    if (memFd < 0) return hits;
+
+    const size_t chunk = 1u << 20;
+    std::vector<char> buf(chunk), win(kMemWindowBytes * 2);
+    size_t budget = kMemScanByteBudget;
+
+    for (const auto& r : readMemRegions()) {
+        if (budget == 0) break;
+        uintptr_t pos = r.start;
+        const uintptr_t rEnd = r.end;
+        // collect anchor hit offsets in this region (bounded)
+        std::vector<uintptr_t> anchorHits;
+        while (pos < rEnd && budget > 0) {
+            const size_t want = static_cast<size_t>(
+                std::min<uintptr_t>(chunk, rEnd - pos));
+            const ssize_t got = ::pread(memFd, buf.data(), want, static_cast<off_t>(pos));
+            if (got <= 0) {
+                pos += want;  // skip unreadable span, keep going
+                continue;
+            }
+            budget -= static_cast<size_t>(got);
+            const std::string_view sv(buf.data(), static_cast<size_t>(got));
+            size_t off = 0;
+            while (off < sv.size()) {
+                size_t f8 = sv.find(anchor, off);
+                size_t f16 = sv.find(p16, off);
+                size_t hit = std::string_view::npos;
+                if (f8 != std::string_view::npos &&
+                    (f16 == std::string_view::npos || f8 < f16)) {
+                    hit = f8;
+                } else if (f16 != std::string_view::npos) {
+                    hit = f16;
+                }
+                if (hit == std::string_view::npos) break;
+                anchorHits.push_back(pos + hit);
+                off = hit + 1;
+            }
+            pos += static_cast<uintptr_t>(got);
+        }
+
+        // for each hit, harvest UTF-16 strings within the window
+        for (uintptr_t hit : anchorHits) {
+            uintptr_t ws = (hit >= r.start + static_cast<uintptr_t>(kMemWindowBytes))
+                               ? hit - kMemWindowBytes
+                               : r.start;
+            uintptr_t we = std::min<uintptr_t>(rEnd, hit + kMemWindowBytes);
+            size_t wn = static_cast<size_t>(we - ws);
+            if (wn > win.size()) wn = win.size();
+            const ssize_t got = ::pread(memFd, win.data(), wn, static_cast<off_t>(ws));
+            if (got <= 0) continue;
+            // decode UTF-16 runs (both byte parities to survive odd alignment)
+            for (int parity = 0; parity < 2; ++parity) {
+                size_t i = (static_cast<size_t>(parity) ^ (ws & 1)) & 1;
+                while (i + 1 < static_cast<size_t>(got)) {
+                    const unsigned char lo = static_cast<unsigned char>(win[i]);
+                    const unsigned char hi = static_cast<unsigned char>(win[i + 1]);
+                    // a readable UTF-16LE unit: ASCII (hi==0) or non-ASCII (lo>=0xa0)
+                    const bool unitOk =
+                        (lo >= 0x20 && lo < 0x7f && hi == 0x00) ||
+                        (lo >= 0xa0 && hi != 0x00);
+                    if (!unitOk) {
+                        i += 2;
+                        continue;
+                    }
+                    size_t runStart = i;
+                    size_t units = 0;
+                    while (i + 1 < static_cast<size_t>(got)) {
+                        const unsigned char l2 = static_cast<unsigned char>(win[i]);
+                        const unsigned char h2 = static_cast<unsigned char>(win[i + 1]);
+                        const bool ok =
+                            (l2 >= 0x20 && l2 < 0x7f && h2 == 0x00) ||
+                            (l2 >= 0xa0 && h2 != 0x00);
+                        if (!ok) break;
+                        ++units;
+                        i += 2;
+                    }
+                    if (units < 3 || units > 64) {
+                        i += 2;  // step over the run terminator
+                        continue;
+                    }
+                    std::string text;
+                    appendU16ToUtf8(win, runStart, units, text);
+                    const long long dist = static_cast<long long>(ws + runStart) >
+                                           static_cast<long long>(hit)
+                                               ? static_cast<long long>(ws + runStart) - hit
+                                               : static_cast<long long>(hit) -
+                                                     static_cast<long long>(ws + runStart);
+                    auto it = std::find_if(hits.begin(), hits.end(),
+                                           [&](const ScanHit& h) { return h.text == text; });
+                    if (it != hits.end()) {
+                        ++it->count;
+                        if (static_cast<int>(dist) < it->minDist) it->minDist = static_cast<int>(dist);
+                    } else {
+                        hits.push_back({text, static_cast<int>(dist), 1});
+                    }
+                }
+            }
+        }
+    }
+    ::close(memFd);
+    std::sort(hits.begin(), hits.end(),
+              [](const ScanHit& a, const ScanHit& b) {
+                  if (a.count != b.count) return a.count > b.count;
+                  return a.minDist < b.minDist;
+              });
+    return hits;
+}
+
+// ---------------------------------------------------------------------------
+// name picking: strict filters, then score = occurrences, closeness, style
+// ---------------------------------------------------------------------------
+static bool isAlphaChar(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+}
+
+static bool looksLikeServerName(const std::string& s, const std::string& anchor) {
+    if (s.size() < 3 || s.size() > 48) return false;
+    int alpha = 0, digit = 0;
+    for (char c : s) {
+        if (isAlphaChar(c))
+            ++alpha;
+        else if (c >= '0' && c <= '9')
+            ++digit;
+        else if (c != ' ' && c != '\'' && c != '-' && c != '&' && c != '!' &&
+                 c != ':')
+            return false;  // hosts/URLs/paths/tech junk
+    }
+    if (alpha < 2 || digit > alpha) return false;  // no all-numeric strings
+    // never echo the anchor itself or its domain
+    const std::string lower = lowerAscii(s);
+    if (lower == lowerAscii(anchor)) return false;
+    if (anchor.find(lower) != std::string::npos) return false;
+    if (lower.find("cubecraft.net") != std::string::npos) return false;
+    static const char* kBad[] = {
+        "minecraft", "server", "realm", "realms", "play", "join", "invite",
+        "friends", "friend", "settings", "menu", "options", "exit", "back",
+        "cancel", "accept", "world", "worlds", "marketplace", "news",
+        "achievements", "wardrobe", "skins", "store", "profile", "online",
+        "offline", "loading", "connecting", "featured", "servers", "custom",
+        "add", "search", "refresh", "public", "private", "more", "pause",
+        "game", "language", "accessibility", "control", "video", "audio",
+        "account", "sign in", "sign out", "host", "port", "address", "name",
+        "players", "player", "loading", "connecting to", "xbox", "live",
+        "the nether", "overworld", "theend", "the end"};
+    const std::string lowerTrim = lowerAscii(trim(s));
+    for (const char* b : kBad)
+        if (lowerTrim == b) return false;
+    return true;
+}
+
+static std::string pickBestName(const std::string& anchor,
+                                const std::vector<ScanHit>& hits,
+                                std::string* debugOut) {
+    std::string best;
+    int bestScore = 0;
+    std::vector<std::pair<int, std::string>> cands;  // (score, text)
+    for (const auto& h : hits) {
+        if (!looksLikeServerName(h.text, anchor)) continue;
+        int score = h.count * 30 - h.minDist / 1024;
+        const std::string t = trim(h.text);
+        if (isAlphaChar(t[0]) && t[0] >= 'A' && t[0] <= 'Z') score += 4;  // Title Case
+        if (t.size() >= 4 && t.size() <= 24) score += 2;
+        cands.emplace_back(score, t);
+        if (score > bestScore) {
+            bestScore = score;
+            best = t;
+        }
+    }
+    std::sort(cands.begin(), cands.end(),
+              [](const std::pair<int, std::string>& a,
+                 const std::pair<int, std::string>& b) { return a.first > b.first; });
+    if (debugOut) {
+        debugOut->clear();
+        for (size_t i = 0; i < cands.size() && i < 5; ++i) {
+            if (i) *debugOut += ", ";
+            *debugOut += std::to_string(cands[i].first) + ":" + cands[i].second;
+        }
+    }
+    return best;
+}
+
+// Reads the signed-in player's XUID from the launcher's catalog_info.json
+// ("<xuid>" : {...}); used as a memory anchor to find the IGN.
+static std::string readPlayerXuid() {
+    std::ifstream in(
+        "/data/data/com.mojang.minecraftpe/games/com.mojang/minecraftpe/"
+        "catalog_info.json");
+    if (!in) return "";
+    std::string content((std::istreambuf_iterator<char>(in)),
+                        std::istreambuf_iterator<char>());
+    size_t i = 0;
+    while (i < content.size()) {
+        if (content[i] == '"') {
+            size_t j = i + 1;
+            while (j < content.size() && content[j] >= '0' && content[j] <= '9') ++j;
+            if (j - (i + 1) >= 10 && j < content.size() &&
+                content[j] == '"')  // long digit run in quotes = XUID
+                return content.substr(i + 1, j - (i + 1));
+            i = j;
+        } else {
+            ++i;
+        }
+    }
+    return "";
+}
+
+// Cached, gated entry points. The server scan only runs while a server/realm
+// session is live (blob cache open); the IGN scan runs lazily and is cached.
+static std::string memScan(const std::string& anchor, ScanResult& cache,
+                           const char* what) {
+    const long long now = nowMs();
+    if (!anchor.empty() && anchor == cache.anchor &&
+        now - cache.atMs < kMemScanEveryMs)
+        return cache.name;
+    std::vector<ScanHit> hits = collectScanHits(anchor);
+    std::string debug;
+    std::string name = pickBestName(anchor, hits, &debug);
+    cache = ScanResult{anchor, name, debug, now};
+    gRawHits = std::move(hits);
+    gRawAnchor = anchor;
+    gRawAt = now;
+    if (gLog && !name.empty())
+        std::fprintf(stderr, "[DiscordRPC] memscan %s: '%s' near '%s'\n", what,
+                     name.c_str(), anchor.c_str());
+    return name;
+}
+
+static std::string memScanServerName(const std::string& anchor) {
+    return memScan(anchor, gServerScan, "server/realm");
+}
+
+static std::string memScanIgn() {
+    return memScan(readPlayerXuid(), gIgnScan, "ign");
+}
+
+// IGN refresher: retry quickly until a name exists, then only refresh every
+// 90 s (the name is stable for a session and the heap scan is not free).
+static std::string gIgnName;
+static long long gIgnNextFull = 0;
+static std::string ignForPresence() {
+    const long long now = nowMs();
+    if (!gIgnName.empty() && now < gIgnNextFull) return gIgnName;
+    std::string n = memScanIgn();
+    if (!n.empty()) gIgnName = n;
+    gIgnNextFull = now + (n.empty() ? 20000 : 90000);
+    return gIgnName;
+}
+
+// ---------------------------------------------------------------------------
+// best-effort dimension for SERVER/REALM sessions (local worlds already use
+// the leveldb markers). The three dimension names exist as UI strings in the
+// game's memory; within a live session the active one tends to occur near the
+// session data. Never guesses: requires a hit that passes the strict filter
+// and is logged as server_dim= so it can be calibrated. Returns 0/1/2/-1.
+// ---------------------------------------------------------------------------
+int gServerDim = -1;
+long long gServerDimAt = 0;
+
+int probeServerDimension() {
+    const long long now = nowMs();
+    if (now - gServerDimAt < kMemScanEveryMs) return gServerDim;
+    gServerDimAt = now;
+    gServerDim = -1;
+    static const char* markers[3] = {"Overworld", "Nether", "TheEnd"};
+    // ensure the anchor scan has fresh raw hits without re-scanning the heap
+    if (gRawAnchor != gServerScan.anchor || now - gRawAt > kMemScanEveryMs)
+        memScanServerName(gServerScan.anchor);
+    int counts[3] = {0, 0, 0};
+    int best = -1, bestN = 0;
+    for (const auto& h : gRawHits) {
+        for (int i = 0; i < 3; ++i) {
+            if (h.text != markers[i]) continue;
+            counts[i] += h.count;
+            if (counts[i] > bestN) {
+                bestN = counts[i];
+                best = i;
+            }
+        }
+    }
+    if (bestN >= 1) gServerDim = best;
+    return gServerDim;
+}
+
+// ---------------------------------------------------------------------------
+// in-game toggle: F8 flips join_enabled while the game runs (mirrors the
+// snaplook mod's keyboard integration; degrades cleanly if unavailable)
+// ---------------------------------------------------------------------------
+static void rewriteConfBool(const std::string& key, bool value) {
+    std::ifstream in(kConfPath);
+    std::vector<std::string> lines;
+    std::string line;
+    bool found = false;
+    while (std::getline(in, line)) {
+        if (line.compare(0, key.size() + 1, key + "=") == 0) {
+            lines.push_back(key + "=" + (value ? "true" : "false"));
+            found = true;
+        } else {
+            lines.push_back(line);
+        }
+    }
+    if (!found) lines.push_back(key + "=" + (value ? "true" : "false"));
+    std::ofstream out(kConfPath, std::ios::trunc);
+    for (const auto& l : lines) out << l << "\n";
+}
+
+static void toggleJoin() {
+    gJoinEnabled = !gJoinEnabled;
+    try {
+        rewriteConfBool("join_enabled", gJoinEnabled);
+    } catch (...) {
+    }
+    if (gLog)
+        std::fprintf(stderr, "[DiscordRPC] join %s (F8)\n",
+                     gJoinEnabled ? "enabled" : "disabled");
+}
+
+using GameWindowHandlePtr = void*;
+using AddKeyboardCb = bool (*)(void* handle, void* user,
+                               bool (*cb)(void* user, int keyCode, int action));
+using GetPrimaryWindow = GameWindowHandlePtr (*)();
+using AddWindowCreatedCb = void (*)(void* user, void (*cb)(void* user));
+
+// Registers the F8 toggle. Called once from presenceInit; missing exports
+// simply disable the toggle (never crash the game).
+void initKeyToggle() {
+    try {
+        void* gw = dlopen("libmcpelauncher_gamewindow.so", 0);
+        if (!gw) {
+            if (gLog)
+                std::fprintf(stderr,
+                             "[DiscordRPC] game-window lib unavailable; F8 join "
+                             "toggle disabled\n");
+            return;
+        }
+        GetPrimaryWindow getPrimary = reinterpret_cast<GetPrimaryWindow>(
+            dlsym(gw, "game_window_get_primary_window"));
+        AddKeyboardCb addKey = reinterpret_cast<AddKeyboardCb>(
+            dlsym(gw, "game_window_add_keyboard_callback"));
+        AddWindowCreatedCb addCreated = reinterpret_cast<AddWindowCreatedCb>(
+            dlsym(gw, "game_window_add_window_creation_callback"));
+        if (!getPrimary || !addKey || !addCreated) return;
+        static bool fn8Down = false;
+        static AddKeyboardCb sAddKey = nullptr;
+        static GetPrimaryWindow sGetPrimary = nullptr;
+        sAddKey = addKey;
+        sGetPrimary = getPrimary;
+        addCreated(nullptr, [](void*) {
+            sAddKey(sGetPrimary(), nullptr,
+                    [](void*, int keyCode, int action) -> bool {
+                        constexpr int kFn8 = 119;  // KeyCode::FN8
+                        if (keyCode == kFn8) {
+                            if (action == 0 && !fn8Down) {  // PRESS, not REPEAT
+                                fn8Down = true;
+                                toggleJoin();
+                            } else if (action == 2) {  // RELEASE
+                                fn8Down = false;
+                            }
+                            return true;  // consume the key
+                        }
+                        return false;
+                    });
+        });
+        if (gLog)
+            std::fprintf(stderr, "[DiscordRPC] F8 = toggle join enabled\n");
+    } catch (...) {
+    }
+}
+
 void loadServerCatalog(std::vector<CatalogEntry>& out) {
     DIR* d = opendir(kCatalogDir);
     if (!d) return;
@@ -977,7 +1464,43 @@ void detectCurrentServer(const std::vector<CatalogEntry>& catalog,
             if (!out.name.empty()) break;
         }
     }
-    if (out.name.empty() && !realmPick.host.empty()) out.kind = "realm";
+
+    // The one host the game is actually connected to: the newest host that has
+    // been resolved at least twice (pass 0), else the newest single resolution.
+    // This is what the in-game memory scan anchors on.
+    std::string anchorHost;
+    for (int pass = 0; pass < 2 && anchorHost.empty(); ++pass) {
+        for (const auto& t : tally) {
+            if ((pass == 0 && t.count > 1) || (pass == 1 && t.count == 1)) {
+                anchorHost = t.host;
+                break;
+            }
+        }
+    }
+    out.anchor = anchorHost;
+
+    // In-process memory scan: pull the display name the game itself keeps in
+    // memory next to the connection host (server name, realm title). Only runs
+    // while a server/realm session is live, and is cached for 20 s.
+    std::string scanName;
+    if (!anchorHost.empty() && multiplayerOnline())
+        scanName = memScanServerName(anchorHost);
+    out.scan = scanName;
+
+    // Precedence: aliases > catalog > in-memory scan > realm marker.
+    if (out.name.empty() && !scanName.empty()) {
+        out.name = scanName;
+        out.kind =
+            anchorHost.find("pocket.realms") != std::string::npos ? "realm" : "server";
+    } else if (!out.name.empty() && !scanName.empty() && out.kind == "server") {
+        // the actual connected sub-server (e.g. "SoulSteel") beats the
+        // network-level catalog name (e.g. "CubeCraft")
+        out.name = scanName;
+    }
+    if (out.name.empty() && !realmPick.host.empty()) {
+        out.kind = "realm";
+        if (!scanName.empty()) out.name = scanName;
+    }
     out.hosts = seen;
 }
 
@@ -1037,6 +1560,30 @@ std::string debugCatalogState() {
     return out.str();
 }
 
+std::string debugServerAnchor() {
+    ServerDetect det;
+    detectServer(det);
+    return det.anchor.empty() ? std::string("(none)") : det.anchor;
+}
+
+std::string debugServerScan() {
+    ServerDetect det;
+    detectServer(det);
+    if (det.scan.empty())
+        return gServerScan.debug.empty() ? std::string("(none)") : "(none) cands=" + gServerScan.debug;
+    return det.scan + " cands=" + gServerScan.debug;
+}
+
+std::string debugIgn() {
+    std::string name = ignForPresence();
+    return name.empty() ? std::string("(none)") : name;
+}
+
+std::string debugServerDim() {
+    int d = probeServerDimension();
+    return d < 0 ? std::string("(none)") : dimensionText(d);
+}
+
 }  // namespace
 
 // Reloads all config values from discordrpc.conf (applied live every few
@@ -1059,6 +1606,7 @@ void reloadConfig() {
         if (gMultiplayer != "server" && gMultiplayer != "realm") gMultiplayer.clear();
         gServerName = trim(std::string(kServerName.get()));
         gDimensionOverride = trim(std::string(kDimension.get()));
+        gShowIgn = kShowIgn.get();
         loadServerAliases();  // repeatable server_alias=Name|host entries
     } catch (const std::exception& ex) {
         std::fprintf(stderr, "[DiscordRPC] ignoring bad config: %s\n", ex.what());
@@ -1082,6 +1630,8 @@ bool presenceInit() {
                      "https://discord.com/developers/applications)\n");
         return false;
     }
+
+    initKeyToggle();  // F8 = toggle join on/off (safe no-op if unavailable)
 
     gVersion = findVersion();
     if (gLog)
@@ -1176,7 +1726,8 @@ void runPresence() {
                 } else if (!detected.name.empty()) {
                     nextState = "On " + detected.name;
                 } else if (detected.kind == "realm") {
-                    nextState = "On a Realm";
+                    nextState = detected.name.empty() ? "On a Realm"
+                                                      : "On " + detected.name;
                 } else {
                     nextState = "On a server or Realm";
                 }
@@ -1185,6 +1736,12 @@ void runPresence() {
                     if (od >= 0)
                         currentDetails =
                             details + " · In the " + dimensionText(od);
+                } else if (gLastDim < 0) {
+                    // best-effort: read the active dimension from the live
+                    // server/realm session (logged as server_dim= for calibration)
+                    int sd = probeServerDimension();
+                    if (sd >= 0)
+                        currentDetails = details + " · In the " + dimensionText(sd);
                 }
             } else {
                 nextState = (elapsed < 10.0) ? "In the launcher..." : "In the menus";
@@ -1228,20 +1785,33 @@ void runPresence() {
                 }
             }
 
-            // ---- assemble the activity (party + join when a world is open) ----
+            // ---- assemble the activity (party + join when joinable + enabled) ----
             Activity a;
             a.state = stateText;
-            a.details = currentDetails;
+            const std::string ignName = ignForPresence();
+            a.details =
+                currentDetails +
+                (gShowIgn && !ignName.empty() ? " · " + ignName : std::string());
             a.startMs = startMs;
             a.largeImage = gLargeImage;
             a.largeText = gLargeText;
             a.smallImage = gSmallImage;
             a.smallText = gSmallText;
-            if (!world.dir.empty() && gJoinEnabled && gJoinMax > 0) {
-                a.partyId = "world-" + world.id;
-                a.partySize = std::min(1 + pendingJoins, gJoinMax);
-                a.partyMax = gJoinMax;
-                a.joinSecret = gJoinAddress.empty() ? world.id : gJoinAddress;
+            const bool joinableWorld = !world.dir.empty();
+            const bool joinableRealm =
+                world.dir.empty() && online && detected.kind == "realm";
+            if ((joinableWorld || joinableRealm) && gJoinEnabled && gJoinMax > 0) {
+                if (joinableRealm) {
+                    a.partyId = "realm-" + detected.anchor;
+                    a.partySize = std::min(1 + pendingJoins, gJoinMax);
+                    a.partyMax = gJoinMax;
+                    a.joinSecret = "realm:" + detected.anchor;
+                } else {
+                    a.partyId = "world-" + world.id;
+                    a.partySize = std::min(1 + pendingJoins, gJoinMax);
+                    a.partyMax = gJoinMax;
+                    a.joinSecret = gJoinAddress.empty() ? world.id : gJoinAddress;
+                }
             }
 
             auto tnow = std::chrono::steady_clock::now();

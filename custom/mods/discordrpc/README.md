@@ -46,31 +46,36 @@ multiplayer=realm       # shows "On a Realm"            (default for realms)
 multiplayer=server      # shows "On a server"           (default for servers)
 ```
 
-### It auto-detects the actual server name
+### It reads the actual server name from the game itself
 
-The launcher's libc shim now records every hostname the game resolves into
-`~/.local/share/mcpelauncher/resolved_hosts.log`, and the mod watches that
-file. When you join a featured server it re-resolves that server's hostname,
-which the mod matches against the featured-server catalog shipped by the game
-(`minecraftpe/ContentCache/ThirdPartyServer/ExperienceManifest` — CubeCraft,
-The Hive, Lifeboat, Mineville, Galaxite, Enchanted, MegaSMP, ...), so the
-presence reads:
+The launcher's libc shim records every hostname the game resolves into
+`~/.local/share/mcpelauncher/resolved_hosts.log`. The mod uses the host the
+game is *connected* to as a memory anchor, then — because the mod runs inside
+the game process — reads the display name the game keeps next to it in its own
+memory. This works on **featured servers, custom IP servers and Realms alike**,
+with no alias or config (e.g. joining SoulSteel reads `SoulSteel`, and joining
+a Realm reads the Realm's actual title):
 
-- `On <Server Name>` — a server whose host matched the catalog (the label is
-  the name the game itself shows in the Featured Servers list);
-- `On a Realm` — when the game resolves a `pocket.realms.*` host;
-- `On a server or Realm` — when nothing can be named (custom IP servers,
-  opaque proxy relays, or the recorder hasn't seen a repeat yet). This is
-  deliberate: the mod never *guesses* a name it cannot observe.
+- `On <Server Name>` — name read from the game's memory (anchored on the
+  host it is connected to), with the featured-server catalog
+  (`ContentCache/ThirdPartyServer`) as fallback;
+- `On <Realm Title>` — same read anchored on the `pocket.realms.*` host, with
+  `On a Realm` as fallback;
+- `On a server or Realm` — when the memory read finds nothing trustworthy.
+  The mod never *guesses* a name it cannot observe.
+
+The candidates it considered each refresh are in `discordrpc.debug`
+(`server_scan=` with score+name, `server_anchor=` the anchor host, and raw
+`scan_cands=`), so the pick rule can be calibrated per game version.
 
 `server_name=` / `multiplayer=` above always win over auto-detection.
 
 ### Naming your own servers (`server_alias`)
 
-The catalog only covers the featured servers the game ships. For everything
-else — private/custom servers, or a specific sub-server of a network — give
-the hostname a name in `discordrpc.conf` (repeatable, checked with priority
-over the catalog, live-reloaded):
+Auto-detection reads a real name from memory in almost all cases now. The
+alias table remains as an explicit override when you want a *different*
+label than the game's own string, or when the memory read can't find one
+(repeatable, checked with priority over every other source, live-reloaded):
 
 ```ini
 # server_alias=<What you want shown>|<host the game resolves>
@@ -82,7 +87,6 @@ What the game actually resolves is visible in
 `~/.local/share/mcpelauncher/resolved_hosts.log` (also mirrored as
 `resolved=` in `discordrpc.debug`) — use the exact hostname from there.
 A wildcard host works too: `server_alias=My Network|*.myserver.net`.
-Realms need no alias: any `pocket.realms.*` host already reads `On a Realm`.
 
 `discordrpc.conf` is **re-read live** (~every 15 seconds), so changing
 `server_name`, `multiplayer`, `dimension` or the artwork keys applies without
@@ -97,8 +101,11 @@ reads it from the world's newest log file, so the state updates when you step
 through a portal.
 
 Server and Realm sessions stream the world from the network and keep **no
-local world**, so the dimension cannot be read there. If you want it labelled
-anyway, set it explicitly (also live-reloadable):
+local world**, so the dimension usually can't be read there. As a best-effort,
+the mod also scans the live session's memory for the active dimension marker
+and logs what it finds as `server_dim=` in `discordrpc.debug` (so it can be
+calibrated per version); many builds expose it, some don't. When you want a
+fixed label while online regardless, set it explicitly (also live-reloadable):
 
 ```ini
 dimension=Nether    # shows "In the Nether" while online
@@ -151,8 +158,10 @@ small_text=Server
 
 ## Join Game button
 
-While you are **inside a world**, rich presence includes a party and a join
-secret, so friends who can see your profile get a **Join** button:
+While you are **inside a world or Realm**, rich presence includes a party and
+a join secret, so friends who can see your profile get a **Join** button.
+**Press `F8` in-game to toggle join on/off** at any time (the choice is saved
+to `join_enabled` in `discordrpc.conf` and survives restarts):
 
 - When a friend clicks it, a join request lands in
   `~/.local/share/mcpelauncher/discordrpc.join` with their username/id, and a
@@ -170,6 +179,14 @@ secret, so friends who can see your profile get a **Join** button:
 This is unofficial: the mod opens the Discord link for you with an address you
 configure, it does not inject into the game's networking, so it cannot break
 on game updates and cannot silently join you to strangers.
+
+## Your in-game name (IGN)
+
+Your Minecraft account name is read from the game's memory (anchored on the
+XUID in `catalog_info.json`) and shown on the second line of the presence, e.g.
+`Playing Minecraft · RespectfulGamer` — no manual entry. Disable it with
+`show_ign=false` in `discordrpc.conf` (false is rare: the game must be logged
+in and the name must be readable; it is logged as `ign=` in `discordrpc.debug`).
 
 ## Verify
 

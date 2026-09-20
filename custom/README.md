@@ -121,20 +121,26 @@ tracks what you are doing, pushed to Discord the moment it changes:
   through a portal. If it cannot be read yet it falls back to `In a survival
   world: <name>` / `In a creative world: <name>` / etc. (name and game mode
   parsed from `level.dat`; state updates within ~1s),
-- `On a server` / `On a Realm` (and the server's **name**) while an external
-  server or Realm session is live — **auto-detected**: online sessions stream
-  chunks into `minecraftpe/blob_cache/` (the mod watches `/proc/self/fd` for
-  exactly one of "local world files" or "blob cache log"), so nothing needs
-  configuring. The launcher's libc shim records every hostname the game
-  resolves (`resolved_hosts.log`), and the mod matches the joined server's
-  host against the game's featured-server catalog, so the presence reads
-  `On CubeCraft`, `On The Hive`, etc. automatically, and `On a Realm` for
-  `pocket.realms.*` hosts. Set `multiplayer=server` / `multiplayer=realm` in
-  the config only to pin the exact wording (they override auto-detection);
-  without a match the label is the honest `On a server or Realm`. `server_name`
-  adds a fixed name (`On CubeCraft`); `dimension` labels the current dimension
-  for online sessions (which keep no local world to read it from). The config
-  file is re-read live every ~15 seconds, so edits apply without a restart.
+- `On a server` / `On a Realm` (with the actual **name**, e.g. `On SoulSteel`
+  or the Realm's title) while an external server or Realm session is live —
+  **auto-detected**: online sessions stream chunks into
+  `minecraftpe/blob_cache/` (the mod watches `/proc/self/fd` for exactly one
+  of "local world files" or "blob cache log"), so nothing needs configuring.
+  The launcher's libc shim records every hostname the game resolves
+  (`resolved_hosts.log`); the mod uses the host the game is connected to as a
+  memory anchor and reads the display name the game keeps next to it in its
+  own memory (it runs inside the game process, so no hooks or ptrace needed).
+  This works on featured servers, custom IP servers and Realms alike
+  (falling back to the featured-server catalog, then the honest
+  `On a server or Realm` when nothing trustworthy is found). The second line
+  can also carry your **IGN** (read from memory, `show_ign=true`).
+  Set `multiplayer=server` / `multiplayer=realm` in the config only to pin
+  the exact wording (they override auto-detection); `server_name` adds a
+  fixed name; `dimension` labels the current dimension for online sessions
+  (which keep no local world — but the mod also tries a best-effort in-session
+  dimension read, logged as `server_dim=`). The config file is re-read live
+  every ~15 seconds, so edits apply without a restart. Full details in
+  `mods/discordrpc/README.md`.
 
 The mod is deliberately free of game-internal hooks: it detects a loaded world
 by watching which `.../minecraftWorlds/<id>/` files the process holds open
@@ -144,13 +150,15 @@ on a future game update (unlike the hook-based mods above). The same
 `/proc/self/fd` watch detects server/realm sessions via the blob-cache
 write-ahead log, so it is just as update-proof.
 
-While you are inside a world the presence also carries a party + join secret,
-so friends get a **Join** button on your profile; requests land in
+While you are inside a world **or Realm** the presence also carries a party +
+join secret, so friends get a **Join** button on your profile; requests land in
 `~/.local/share/mcpelauncher/discordrpc.join` and the counter in
-`discordrpc.state` ticks up. Configure `join_address` (your reachable
-LAN/VPN/public address) so joiners see what to connect to. Art assets come
-from your own Discord application — upload them in the Developer Portal and
-reference their keys with `large_image` / `small_image` in the config.
+`discordrpc.state` ticks up. **Press `F8` in-game to toggle join on/off**
+(saved to `join_enabled` in the config). Configure `join_address` (your
+reachable LAN/VPN/public address) so joiners see what to connect to. Art
+assets come from your own Discord application — upload them in the Developer
+Portal and reference their keys with `large_image` / `small_image` in the
+config.
 
 Enable it once (2 minutes, requires your own Discord app ID — Discord shows
 the app's registered name/artwork, which only your own application controls):
