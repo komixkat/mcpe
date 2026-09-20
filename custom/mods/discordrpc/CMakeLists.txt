@@ -18,4 +18,9 @@ add_library(mcpelauncherdiscordrpc SHARED
 
 target_include_directories(mcpelauncherdiscordrpc PRIVATE src)
 
+if(CMAKE_BUILD_TYPE STREQUAL "Release")
+    target_compile_options(mcpelauncherdiscordrpc PRIVATE -O3 -flto)
+    target_link_options(mcpelauncherdiscordrpc PRIVATE -flto)
+endif()
+
 install(TARGETS mcpelauncherdiscordrpc LIBRARY DESTINATION mods)

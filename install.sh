@@ -153,7 +153,7 @@ if [ -f "$BUNDLE" ]; then
   write_mod_meta "snaplook" "$TAG" "$ABI" '{"metadata":{"name":"Snaplook","description":"Hold a key to snap into an over-the-shoulder view behind your character.","url":"https://github.com/komixkat/mcpe","image":""}}'
   write_mod_meta "zoom" "$TAG" "$ABI" '{"metadata":{"name":"Zoom","description":"Zoom in while playing (hold a key; sensitivity adjustable in the mod config).","url":"https://github.com/komixkat/mcpe","image":""}}'
   write_mod_meta "shulkerpreview" "$TAG" "$ABI" '{"metadata":{"name":"Shulker Preview","description":"Preview the contents of shulker boxes without opening them.","url":"https://github.com/komixkat/mcpe","image":""}}'
-  write_mod_meta "discordrpc" "$TAG" "$ABI" '{"metadata":{"name":"Discord Rich Presence","description":"Shows \"Playing Minecraft\" on your Discord profile with live states: menus, survival/creative worlds (auto-detected dimension: Overworld/Nether/The End), servers and realms, plus an optional Join button while you host a world. Activate by adding your Discord app Client ID to discordrpc.conf.","url":"https://github.com/komixkat/mcpe/blob/qt6/custom/mods/discordrpc/README.md","image":""}}'
+  write_mod_meta "discordrpc" "$TAG" "$ABI" '{"metadata":{"name":"Discord Rich Presence","description":"Shows \"Playing Minecraft\" on your Discord profile with a \"Join komixkat\" button that opens the Minecraft profile page. Activate by adding your Discord app Client ID to discordrpc.conf.","url":"https://github.com/komixkat/mcpe/blob/qt6/custom/mods/discordrpc/README.md","image":""}}'
 else
   echo "WARNING: $TAG has no $BUNDLE; skipping fixed mods." >&2
 fi
@@ -211,49 +211,22 @@ fi
 if [ ! -f "$DATA_DIR/discordrpc.conf" ]; then
   cat > "$DATA_DIR/discordrpc.conf" <<'EOF'
 # Discord Rich Presence for the launcher/game (custom/mods/discordrpc).
+# The presence is always "Playing Minecraft" (with an elapsed timer) plus a
+# "Join komixkat" button that opens the Minecraft profile page.
+# Config is re-read every ~15 seconds, so edits apply without restarting.
+#
 # 1. Create a Discord application: https://discord.com/developers/applications
 # 2. Copy its Client ID into client_id below.
-# 3. (Optional, logo) In the Developer Portal -> your application -> "Rich
-#    Presence Art Assets" -> upload images, then put the image keys below.
-# 4. Restart the game with Discord running; see ~/.local/share/mcpelauncher/discordrpc.state.
+# 3. Restart the game with Discord running.
 client_id=
 
-# Show the Minecraft version on the second line (default: just "Playing Minecraft").
-show_version=false
-
-# Art assets. The values are the KEYS you gave your images in the Discord
-# Developer Portal (e.g. "mcpe-logo"); Discord shows the matching artwork.
+# Optional artwork: upload images in the Developer Portal (Rich Presence ->
+# Art Assets), then set the keys here. Empty uses Discord's default icon.
 large_image=
 large_text=
-small_image=
-small_text=
 
-# Join Game button. While you are inside a world, friends with the same app see
-# a "Join" button on your profile; join requests land in discordrpc.join.
-# join_address is what joiners are told to connect to (e.g. your VPN/LAN IP or
-# a domain with port-forwarding, "1.2.3.4:19132"). Leave empty to just log who
-# wants to join.
-join_enabled=true
-join_max=10
-join_address=
-
-# Optional exact wording while on an external server / Realm:
-#   multiplayer=server   -> "On a server"
-#   multiplayer=realm    -> "On a Realm"
-# Server/Realm sessions are auto-detected either way (default label:
-# "On a server or Realm"). Leave empty for that default.
-multiplayer=
-
-# Optional label shown for EVERY external server session ("On <name>"). The
-# game keeps no server name on disk that the mod can read, so set this if you
-# mostly play one server (e.g. server_name=CubeCraft). Leave empty for the
-# generic label.
-server_name=
-
-# Optional dimension label for server/Realm sessions, where the game keeps no
-# local world to auto-detect from. Values: Overworld, Nether, The End.
-# Singleplayer worlds detect their dimension automatically; leave empty there.
-dimension=
+# Quiet the "[DiscordRPC]" connection lines on the launcher console.
+log=true
 EOF
   echo "  OK: created discordrpc.conf (set client_id to enable presence)"
 fi

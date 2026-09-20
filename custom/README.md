@@ -1,4 +1,4 @@
-# custom/ — everything this fork adds
+# custom/: everything this fork adds
 
 Everything in this directory is maintained by this fork. It is kept apart from
 the vendored upstream launcher/UI trees so the fork's additions have one
@@ -95,14 +95,14 @@ and the launcher client force `only_show_trusted_skins=0` in `options.txt`.
 (`global_resource_packs.json`, `resource_packs.json`,
 `known_resource_packs.json`) exist in `games/com.mojang/` as `[]`: when they
 are missing, every session is treated as a failed resource load and the game
-shows the "Global Resources Reset — Resources failed to load previously"
+shows the "Global Resources Reset - Resources failed to load previously"
 dialog at every launch.
 
 `install.sh` additionally bakes the skin texture into the game's *default*
 skins: the vanilla `skin_packs/vanilla/steve.png` and `alex.png` inside the
 extracted game assets are replaced with `skin/Nekomix/nekomix.png` (originals
 kept as `*.png.bak`). Bedrock always has a default skin even when no pack is
-selected, so the custom skin then shows permanently everywhere — in menus, on
+selected, so the custom skin then shows permanently everywhere: in menus, on
 your own player model, and (client-side) as the default even if a future
 session picks no pack. Re-run `install.sh` after a game-version update.
 
@@ -113,7 +113,7 @@ while playing, your Discord profile shows **`Playing Minecraft`** with an
 elapsed timer and a single **`Join komixkat`** button that opens the Minecraft
 profile page (`https://launch.minecraft.net/profile/komixkat`).
 
-That is all it does — deliberately. No server/realm names, no dimensions, no
+That is all it does - deliberately. No server/realm names, no dimensions, no
 in-game name: nothing is scanned or detected from the game, so the presence
 cannot show wrong text, stall, or freeze your session.
 
@@ -121,7 +121,7 @@ The mod is free of game-internal hooks by construction: it is just a unix
 socket client of Discord's public IPC protocol, with no signatures and nothing
 to break on a game update.
 
-Enable it once (2 minutes, requires your own Discord app ID — Discord shows
+Enable it once (2 minutes, requires your own Discord app ID - Discord shows
 the app's registered name/artwork, which only your own application controls):
 
 ```bash
@@ -131,7 +131,7 @@ EOF
 ```
 
 Then restart the game with Discord desktop running. Art assets come from your
-own Discord application — upload them in the Developer Portal and reference
+own Discord application - upload them in the Developer Portal and reference
 the key with `large_image` in the config. Setup notes live in
 `mods/discordrpc/README.md`. `install.sh` seeds a default `discordrpc.conf`
 (with every key commented, `client_id=` empty) so the file is already in

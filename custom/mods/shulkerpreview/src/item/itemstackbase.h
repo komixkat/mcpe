@@ -11,7 +11,7 @@ public:
     WeakPtr<Item>   mItem;
     CompoundTag*    mUserData;
     uint8_t _pad_18[0x88 - 0x18];
-    
+
 public:
     virtual ~ItemStackBase();
 };

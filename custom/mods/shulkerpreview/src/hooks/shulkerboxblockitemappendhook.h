@@ -57,7 +57,7 @@ inline void ShulkerBoxBlockItem_appendFormattedHovertext_hook(
     prefix += Hex[tooltipId & 0xF];
     prefix += "\xC2\xA7";
     prefix += color;
-    
+
     out.insert(0, prefix);
 
     out += "\n§7Press §e";

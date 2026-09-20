@@ -382,10 +382,10 @@ extern "C" Elf64_Addr mcpelauncher_pairip_plt_resolve_handler(void* ctx_ptr, lon
                     return resolved;
                 }
 
-                // Undefined symbol — would need to search loaded libraries.
+                // Undefined symbol - would need to search loaded libraries.
                 // Fall through to the no-op stub below.
                 Log::warn("Launcher",
-                    "PairIP PLT resolver cannot resolve undefined symbol '%s' (index=%ld) — using no-op",
+                    "PairIP PLT resolver cannot resolve undefined symbol '%s' (index=%ld) - using no-op",
                     sym_name, plt_index);
                 break;
             }
@@ -395,7 +395,7 @@ extern "C" Elf64_Addr mcpelauncher_pairip_plt_resolve_handler(void* ctx_ptr, lon
     // No usable .rela.plt entry. Install no-op stub.
     Elf64_Addr caller_offset = reinterpret_cast<Elf64_Addr>(return_addr) - ctx->load_bias;
     Log::warn("Launcher",
-        "PairIP: unresolved PLT entry %ld in %s (caller offset 0x%lx) — using no-op stub",
+        "PairIP: unresolved PLT entry %ld in %s (caller offset 0x%lx) - using no-op stub",
         plt_index, ctx->path ? ctx->path : "(libPlayFabMultiplayer.so)",
         (unsigned long)caller_offset);
 
@@ -480,7 +480,7 @@ void apply_pairip_plt_workaround() {
     // library was not pulled in by libminecraftpe.so, we have nothing to do.
     void* pfm = linker::dlopen("libPlayFabMultiplayer.so", RTLD_NOLOAD);
     if (!pfm) {
-        Log::info("Launcher", "PairIP: libPlayFabMultiplayer.so not loaded — skipping PLT workaround");
+        Log::info("Launcher", "PairIP: libPlayFabMultiplayer.so not loaded - skipping PLT workaround");
         return;
     }
     size_t pfm_base = linker::get_library_base(pfm);
@@ -514,7 +514,7 @@ void apply_pairip_plt_workaround_for(uintptr_t base, const char* libname) {
     uintptr_t load_bias = pfm_elf.base;
 
     if (plt_got_addr_ == nullptr || plt_rela_ == nullptr || plt_rela_count_ == 0) {
-        Log::info("Launcher", "PairIP: libPlayFab has no PLT/.rela.plt — skipping");
+        Log::info("Launcher", "PairIP: libPlayFab has no PLT/.rela.plt - skipping");
         return;
     }
 
@@ -774,7 +774,7 @@ void apply_pairip_plt_workaround_for(uintptr_t base, const char* libname) {
     }
 
     if (plt_section_base == 0) {
-        Log::info("Launcher", "PairIP: no unresolved PLT entries in libPlayFabMultiplayer.so — skipping");
+        Log::info("Launcher", "PairIP: no unresolved PLT entries in libPlayFabMultiplayer.so - skipping");
         return;
     }
 
@@ -814,7 +814,7 @@ void apply_pairip_plt_workaround_for(uintptr_t base, const char* libname) {
         active_table_count = known_plt_funcs_v126_count;
     } else {
         Log::warn("Launcher",
-            "PairIP: unrecognized PLT count %zu in libPlayFab — only resolver fallback will be used",
+            "PairIP: unrecognized PLT count %zu in libPlayFab - only resolver fallback will be used",
             plt_count);
     }
 
@@ -839,7 +839,7 @@ void apply_pairip_plt_workaround_for(uintptr_t base, const char* libname) {
                 }
             }
             if (!found) {
-                // Unknown entry — apply load_bias so PLT fallback triggers
+                // Unknown entry - apply load_bias so PLT fallback triggers
                 // resolver via GOT[2].
                 func_entries[i] = value + load_bias;
                 fixed_count++;
@@ -852,7 +852,7 @@ void apply_pairip_plt_workaround_for(uintptr_t base, const char* libname) {
             "PairIP PLT fixup in %s: %zu resolved to known funcs, %zu using resolver",
             realpath, known_count, fixed_count);
 
-        // Allocate persistent resolver context (leaked intentionally — single
+        // Allocate persistent resolver context (leaked intentionally - single
         // per-process, lives for the lifetime of the launcher).
         static ResolverContext s_ctx;
         s_ctx.load_bias = load_bias;

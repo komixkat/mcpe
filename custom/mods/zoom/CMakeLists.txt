@@ -23,4 +23,9 @@ add_library(mcpelauncherzoom SHARED src/main.cpp src/zoom.cpp src/zoom.h src/uti
 
 target_link_libraries(mcpelauncherzoom PUBLIC libhat::libhat properties-parser)
 
+if(CMAKE_BUILD_TYPE STREQUAL "Release")
+    target_compile_options(mcpelauncherzoom PRIVATE -O3 -flto)
+    target_link_options(mcpelauncherzoom PRIVATE -flto)
+endif()
+
 install(TARGETS mcpelauncherzoom LIBRARY DESTINATION mods)

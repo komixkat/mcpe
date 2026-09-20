@@ -21,7 +21,7 @@ private:
 
 public:
     property_list() {}
-    
+
     property_list(char sep) : sep(sep) {}
 
     void register_property(std::string name, std::function<void (std::string const&)> parse_value,

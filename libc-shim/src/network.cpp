@@ -29,9 +29,6 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <cstdio>
-#include <ctime>
-#include <atomic>
-#include "iorewrite.h"
 
 using namespace shim;
 
@@ -365,124 +362,7 @@ int shim::socket(bionic::af_family domain, bionic::socktype type, bionic::ipprot
     return ::socket(bionic::to_host_af_family(domain), bionic::to_host_socktype(type), bionic::to_host_ipproto(proto));
 }
 
-// ---------------------------------------------------------------------------
-// Hostname recorder (server / realm detection for the Discord RPC mod)
-//
-// Every hostname the game resolves flows through the libc shim, which makes
-// this the one place guaranteed to see the external server the player joins.
-// We append "<unix-time> <hostname>" lines to resolved_hosts.log inside the
-// launcher data directory (via the same rewrite map the client uses); the RPC
-// mod reads that file and matches the hostnames against the featured-server
-// catalog to name the server and to tell third-party servers apart from
-// Realms.
-//
-// This is launcher code, not a game hook, so it stays valid across game
-// updates. It is deliberately tiny and allocation-light: fixed stack buffer,
-// raw syscalls, per-host throttling and a hard size cap, so it is safe on any
-// game thread.
-// ---------------------------------------------------------------------------
-namespace {
-constexpr const char* kResolvedHostsRel =
-    "/data/data/com.mojang.minecraftpe/resolved_hosts.log";
-constexpr size_t kResolvedHostsMax = 64 * 1024;       // hard cap on file size
-constexpr size_t kResolvedHostsTailRead = 16 * 1024;  // bytes kept when trimming
-constexpr size_t kResolvedHostsSlots = 24;            // per-host throttle slots
-constexpr int kResolvedHostsMinSec = 5;               // same host: once per 5 s
-
-struct HostSlot {
-    char name[160];
-    time_t at;
-};
-HostSlot g_hostSlots[kResolvedHostsSlots] = {};
-std::atomic_flag g_hostLogBusy = ATOMIC_FLAG_INIT;
-
-bool recentHostMatches(const char* node) {
-    const time_t now = ::time(nullptr);
-    for (const auto& s : g_hostSlots) {
-        if (s.name[0] && std::strcmp(s.name, node) == 0 && now - s.at < kResolvedHostsMinSec)
-            return true;
-    }
-    return false;
-}
-
-void rememberHost(const char* node, size_t n) {
-    size_t oldest = 0;
-    time_t oldestAt = g_hostSlots[0].at;
-    for (size_t i = 1; i < kResolvedHostsSlots; ++i) {
-        if (g_hostSlots[i].at < oldestAt) {
-            oldestAt = g_hostSlots[i].at;
-            oldest = i;
-        }
-    }
-    const size_t c =
-        n < sizeof(g_hostSlots[oldest].name) - 1 ? n : sizeof(g_hostSlots[oldest].name) - 1;
-    std::memcpy(g_hostSlots[oldest].name, node, c);
-    g_hostSlots[oldest].name[c] = '\0';
-    g_hostSlots[oldest].at = ::time(nullptr);
-}
-}  // namespace
-
-void recordResolvedHost(const char* node) {
-    if (!node || !node[0]) return;
-    const size_t n = std::strlen(node);
-    if (n < 4 || n >= 160) return;
-
-    // Keep only real hostnames: must contain a letter and a dot, and only
-    // hostname characters (a-z A-Z 0-9 . - _).
-    bool hasLetter = false;
-    bool hasDot = false;
-    for (size_t i = 0; i < n; ++i) {
-        const char c = node[i];
-        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'))
-            hasLetter = true;
-        else if (c == '.')
-            hasDot = true;
-        else if (!((c >= '0' && c <= '9') || c == '-' || c == '_'))
-            return;  // numeric address / odd input
-    }
-    if (!hasLetter || !hasDot) return;
-    if (std::strcmp(node, "localhost") == 0 || std::strcmp(node, "ip6-localhost") == 0 ||
-        std::strcmp(node, "ip6-loopback") == 0)
-        return;
-
-    if (recentHostMatches(node)) return;  // throttle
-
-    // Serialize with other threads; if a trim is in progress, drop quietly.
-    if (g_hostLogBusy.test_and_set(std::memory_order_acquire)) return;
-    int fd = -1;
-    do {
-        const std::string real = iorewrite0(kResolvedHostsRel);
-        if (real.empty()) break;
-        fd = ::open(real.c_str(), O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
-        if (fd < 0) break;
-
-        char line[192];
-        const int ln = ::snprintf(line, sizeof(line), "%lld %s\n",
-                                  static_cast<long long>(::time(nullptr)), node);
-        if (ln > 0) {
-            const ssize_t w = ::write(fd, line, static_cast<size_t>(ln));
-            (void)w;
-        }
-
-        struct stat st;
-        if (::fstat(fd, &st) == 0 && st.st_size > static_cast<off_t>(kResolvedHostsMax)) {
-            char tail[kResolvedHostsTailRead];
-            const ssize_t got = ::pread(fd, tail, sizeof(tail),
-                                        st.st_size - static_cast<off_t>(sizeof(tail)));
-            ::ftruncate(fd, 0);
-            if (got > 0) {
-                const ssize_t w = ::pwrite(fd, tail, static_cast<size_t>(got), 0);
-                (void)w;
-            }
-        }
-        ::close(fd);
-    } while (false);
-    g_hostLogBusy.clear(std::memory_order_release);
-    rememberHost(node, n);
-}
-
 int shim::getaddrinfo(const char *node, const char *service, const bionic::addrinfo *hints, bionic::addrinfo **res) {
-    recordResolvedHost(node);
     auto hhints = bionic::to_host_alloc(hints);
     ::addrinfo *hres;
     int ret = ::getaddrinfo(node, service, hhints, &hres);

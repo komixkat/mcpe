@@ -11,5 +11,5 @@ public:
     float mOffsetY;   // 0x4C
 
     float mBoxWidth;  // 0x50
-    float mBoxHeight; // 0x54   
+    float mBoxHeight; // 0x54
 };

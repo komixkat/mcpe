@@ -43,7 +43,7 @@ inline void HoverRenderer_renderHoverBox_hook(
 
     if (!sPreviewEnabled)
         return;
-    
+
     const std::string& text = self->mFilteredContent;
 
     if (text.find("\xC2\xA7v") == std::string::npos)

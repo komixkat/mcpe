@@ -40,5 +40,4 @@ public:
     virtual void vfunc34() = 0;
     virtual void vfunc35() = 0;// 1.21.114
     virtual short getMaxDamage() const; // 1.24
-};
-// prolly getting deleted in the future might just use offsets 
+}; 

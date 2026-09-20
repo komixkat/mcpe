@@ -11,7 +11,7 @@ Playing Minecraft        ← details (line 2)
 ```
 
 Nothing else is detected or scanned: no server/realm names, no dimensions, no
-in-game name. The presence is always the same — that is the point. The button
+in-game name. The presence is always the same (that is the point). The button
 is a Discord link button, so it has no special permissions: it just opens the
 profile URL.
 
@@ -60,7 +60,7 @@ connection chatter.
   crash the game. It only speaks Discord's public IPC protocol over its own
   unix-socket client.
 - **Nothing to misdetect.** There is no scanning, no memory reads, no game
-  state collection — the presence cannot go wrong or stall.
+  state collection; the presence cannot go wrong or stall.
 - **Fail-closed.** Discord absent → quiet retry with backoff, no logging spam.
   Bad config (no numeric `client_id`) → one stderr line and the mod stays
   disabled.

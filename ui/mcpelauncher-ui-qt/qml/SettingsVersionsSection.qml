@@ -53,7 +53,7 @@ ColumnLayout {
                         Text {
                             id: warningText
                             padding: 10
-                            text: qsTr("You’re most likely mistaken here — to download and install different versions, open the launcher’s Home page and click the Profile Edit pencil icon.")
+                            text: qsTr("You’re most likely mistaken here - to download and install different versions, open the launcher’s Home page and click the Profile Edit pencil icon.")
                             color: "#fff"
                             font.pointSize: labelFontSize
                             wrapMode: Text.WordWrap

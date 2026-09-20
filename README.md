@@ -88,7 +88,7 @@ and rebuilt.
 - `mcpelauncher-client/`, `mcpelauncher-core/` and the rest: the launcher
   source with the login and 1.26.x fixes applied.
 - `ui/`: the Qt launcher UI source (vendored, single-tree).
-- `custom/`: everything this fork adds — the fixed mod sources
+- `custom/`: everything this fork adds: the fixed mod sources
   (`custom/mods/`), the skin pack (`custom/skin/`), the provenance patches, and
   the mod build script. `custom/README.md` explains the layout and how the mods
   are kept working across launcher and game updates.

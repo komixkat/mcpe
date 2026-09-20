@@ -69,6 +69,11 @@ target_link_options(shulke PRIVATE
     -static-libstdc++
 )
 
+if(CMAKE_BUILD_TYPE STREQUAL "Release")
+    target_compile_options(shulke PRIVATE -O3 -flto)
+    target_link_options(shulke PRIVATE -flto)
+endif()
+
 set_target_properties(shulke PROPERTIES
     OUTPUT_NAME shulke
 )

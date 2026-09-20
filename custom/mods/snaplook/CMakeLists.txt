@@ -21,5 +21,10 @@ FetchContent_MakeAvailable(libhat properties-parser)
 
 find_library(log-lib log android-lib android)
 
-add_library(mcpelaunchersnaplook SHARED src/main.cpp src/main.h src/conf.cpp src/conf.h src/imgui.cpp src/imgui.h src/key_mapping.h src/main.cpp src/main.h src/snaplook.cpp src/snaplook.h src/util.cpp src/util.h)
+add_library(mcpelaunchersnaplook SHARED src/main.cpp src/main.h src/conf.cpp src/conf.h src/imgui.cpp src/imgui.h src/key_mapping.h src/snaplook.cpp src/snaplook.h src/util.cpp src/util.h)
 target_link_libraries(mcpelaunchersnaplook PUBLIC ${log-lib} android libhat::libhat properties-parser)
+
+if(CMAKE_BUILD_TYPE STREQUAL "Release")
+    target_compile_options(mcpelaunchersnaplook PRIVATE -O3 -flto)
+    target_link_options(mcpelaunchersnaplook PRIVATE -flto)
+endif()
