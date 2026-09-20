@@ -2,6 +2,8 @@
 
 #include "discord_ipc.h"
 
+#include "scan.h"
+
 #include <algorithm>
 #include <cctype>
 #include <chrono>
@@ -82,13 +84,6 @@ ScanResult gServerScan, gIgnScan;
 // ---------------------------------------------------------------------------
 // small file/string helpers
 // ---------------------------------------------------------------------------
-
-std::string trim(std::string s) {
-    size_t b = s.find_first_not_of(" \t\r\n");
-    if (b == std::string::npos) return "";
-    size_t e = s.find_last_not_of(" \t\r\n");
-    return s.substr(b, e - b + 1);
-}
 
 std::string readFirstLine(const std::string& path) {
     std::ifstream in(path);
@@ -734,14 +729,6 @@ struct ServerDetect {
     std::string scan;    // debug only: what the in-memory scan found near anchor
 };
 
-std::string lowerAscii(const std::string& in) {
-    std::string out;
-    out.reserve(in.size());
-    for (char c : in)
-        out += (c >= 'A' && c <= 'Z') ? static_cast<char>(c + 32) : c;
-    return out;
-}
-
 // Reads a JSON string starting at `open` (the opening quote). Returns the raw
 // content (escape pairs preserved) and sets `end` to the closing quote index.
 std::string readJsonStringAt(const std::string& s, size_t open, size_t& end) {
@@ -872,279 +859,11 @@ void loadServerAliases() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// in-process memory scans (signature-free: the mod shares the game's address
-// space, so it can read what the game itself keeps in memory - the connected
-// server's display name, realm titles, the player's IGN, and dimensions).
-//
-// We anchor on strings we already know exist ("mco.cubecraft.net", the XUID
-// of the logged-in account) and harvest human-readable UTF-16 strings near
-// them - Bedrock stores UI strings as UTF-16, and a server/realm item keeps
-// its display name next to its address in many builds. Strict filtering
-// keeps false positives out; results are logged for calibration.
-// ---------------------------------------------------------------------------
-constexpr int kMemWindowBytes = 32768;        // look ±32 KiB around each hit
-constexpr long long kMemScanEveryMs = 20000;  // at most one scan / 20 s
-constexpr size_t kMemScanByteBudget = 2ull << 30;  // byte budget per scan
-
-struct MemRegion {
-    uintptr_t start, end;
-};
-
-static std::vector<MemRegion> readMemRegions() {
-    std::vector<MemRegion> out;
-    std::ifstream maps("/proc/self/maps");
-    std::string line;
-    while (std::getline(maps, line)) {
-        uintptr_t start = 0, end = 0;
-        std::string perms, name;
-        char dash = 0;
-        std::istringstream ss(line);
-        if (!(ss >> std::hex >> start >> dash >> std::hex >> end)) continue;
-        if (!(ss >> perms)) continue;
-        long off = 0;
-        std::string dev;
-        long ino = 0;
-        ss >> std::dec >> off >> dev >> ino;
-        std::getline(ss, name);
-        name = trim(name);
-        if (perms.empty() || perms[0] != 'r') continue;
-        // only writable anonymous memory + [heap]: that's where server items,
-        // profile data and UI strings actually live. Skip stacks, vvar/vdso,
-        // code, and huge file-backed mappings (world data, packs).
-        if (name == "[heap]") {
-            out.push_back({start, end});
-        } else if (name.empty() && perms.size() >= 2 && perms[1] == 'w') {
-            if (end - start <= (2ull << 30)) out.push_back({start, end});
-        }
-    }
-    return out;
-}
-
-// Converts a UTF-16LE code-unit run to UTF-8 (basic planes; skips surrogates).
-static void appendU16ToUtf8(const std::vector<char>& buf, size_t start,
-                            size_t n, std::string& out) {
-    for (size_t i = 0; i < n; ++i) {
-        const char16_t c = static_cast<unsigned char>(buf[start + i * 2]) |
-                           (static_cast<unsigned char>(buf[start + i * 2 + 1]) << 8);
-        if (c >= 0xD800 && c <= 0xDFFF) continue;  // surrogate halves
-        if (c < 0x80) {
-            out += static_cast<char>(c);
-        } else if (c < 0x800) {
-            out += static_cast<char>(0xC0 | (c >> 6));
-            out += static_cast<char>(0x80 | (c & 0x3F));
-        } else {
-            out += static_cast<char>(0xE0 | (c >> 12));
-            out += static_cast<char>(0x80 | ((c >> 6) & 0x3F));
-            out += static_cast<char>(0x80 | (c & 0x3F));
-        }
-    }
-}
-
-struct ScanHit {
-    std::string text;  // UTF-8
-    int minDist = 0;   // closest distance to an anchor hit (bytes)
-    int count = 0;     // number of anchor hits whose window produced it
-};
-
 // Raw hits of the most recent server-anchor scan (reused by the dimension
 // probe so the heap is only ever scanned once per refresh window).
 std::vector<ScanHit> gRawHits;
 std::string gRawAnchor;
 long long gRawAt = 0;
-
-// Scans the writable heap for the anchor (as ASCII and as UTF-16LE) and
-// collects printable UTF-16 strings inside a window around each occurrence.
-static std::vector<ScanHit> collectScanHits(const std::string& anchor) {
-    std::vector<ScanHit> hits;
-    if (anchor.empty()) return hits;
-    std::string p16;
-    p16.reserve(anchor.size() * 2);
-    for (char c : anchor) {
-        p16.push_back(c);
-        p16.push_back('\0');
-    }
-    int memFd = ::open("/proc/self/mem", O_RDONLY);
-    if (memFd < 0) return hits;
-
-    const size_t chunk = 1u << 20;
-    std::vector<char> buf(chunk), win(kMemWindowBytes * 2);
-    size_t budget = kMemScanByteBudget;
-
-    for (const auto& r : readMemRegions()) {
-        if (budget == 0) break;
-        uintptr_t pos = r.start;
-        const uintptr_t rEnd = r.end;
-        // collect anchor hit offsets in this region (bounded)
-        std::vector<uintptr_t> anchorHits;
-        while (pos < rEnd && budget > 0) {
-            const size_t want = static_cast<size_t>(
-                std::min<uintptr_t>(chunk, rEnd - pos));
-            const ssize_t got = ::pread(memFd, buf.data(), want, static_cast<off_t>(pos));
-            if (got <= 0) {
-                pos += want;  // skip unreadable span, keep going
-                continue;
-            }
-            budget -= static_cast<size_t>(got);
-            const std::string_view sv(buf.data(), static_cast<size_t>(got));
-            size_t off = 0;
-            while (off < sv.size()) {
-                size_t f8 = sv.find(anchor, off);
-                size_t f16 = sv.find(p16, off);
-                size_t hit = std::string_view::npos;
-                if (f8 != std::string_view::npos &&
-                    (f16 == std::string_view::npos || f8 < f16)) {
-                    hit = f8;
-                } else if (f16 != std::string_view::npos) {
-                    hit = f16;
-                }
-                if (hit == std::string_view::npos) break;
-                anchorHits.push_back(pos + hit);
-                off = hit + 1;
-            }
-            pos += static_cast<uintptr_t>(got);
-        }
-
-        // for each hit, harvest UTF-16 strings within the window
-        for (uintptr_t hit : anchorHits) {
-            uintptr_t ws = (hit >= r.start + static_cast<uintptr_t>(kMemWindowBytes))
-                               ? hit - kMemWindowBytes
-                               : r.start;
-            uintptr_t we = std::min<uintptr_t>(rEnd, hit + kMemWindowBytes);
-            size_t wn = static_cast<size_t>(we - ws);
-            if (wn > win.size()) wn = win.size();
-            const ssize_t got = ::pread(memFd, win.data(), wn, static_cast<off_t>(ws));
-            if (got <= 0) continue;
-            // decode UTF-16 runs (both byte parities to survive odd alignment)
-            for (int parity = 0; parity < 2; ++parity) {
-                size_t i = (static_cast<size_t>(parity) ^ (ws & 1)) & 1;
-                while (i + 1 < static_cast<size_t>(got)) {
-                    const unsigned char lo = static_cast<unsigned char>(win[i]);
-                    const unsigned char hi = static_cast<unsigned char>(win[i + 1]);
-                    // a readable UTF-16LE unit: ASCII (hi==0) or non-ASCII (lo>=0xa0)
-                    const bool unitOk =
-                        (lo >= 0x20 && lo < 0x7f && hi == 0x00) ||
-                        (lo >= 0xa0 && hi != 0x00);
-                    if (!unitOk) {
-                        i += 2;
-                        continue;
-                    }
-                    size_t runStart = i;
-                    size_t units = 0;
-                    while (i + 1 < static_cast<size_t>(got)) {
-                        const unsigned char l2 = static_cast<unsigned char>(win[i]);
-                        const unsigned char h2 = static_cast<unsigned char>(win[i + 1]);
-                        const bool ok =
-                            (l2 >= 0x20 && l2 < 0x7f && h2 == 0x00) ||
-                            (l2 >= 0xa0 && h2 != 0x00);
-                        if (!ok) break;
-                        ++units;
-                        i += 2;
-                    }
-                    if (units < 3 || units > 64) {
-                        i += 2;  // step over the run terminator
-                        continue;
-                    }
-                    std::string text;
-                    appendU16ToUtf8(win, runStart, units, text);
-                    const long long dist = static_cast<long long>(ws + runStart) >
-                                           static_cast<long long>(hit)
-                                               ? static_cast<long long>(ws + runStart) - hit
-                                               : static_cast<long long>(hit) -
-                                                     static_cast<long long>(ws + runStart);
-                    auto it = std::find_if(hits.begin(), hits.end(),
-                                           [&](const ScanHit& h) { return h.text == text; });
-                    if (it != hits.end()) {
-                        ++it->count;
-                        if (static_cast<int>(dist) < it->minDist) it->minDist = static_cast<int>(dist);
-                    } else {
-                        hits.push_back({text, static_cast<int>(dist), 1});
-                    }
-                }
-            }
-        }
-    }
-    ::close(memFd);
-    std::sort(hits.begin(), hits.end(),
-              [](const ScanHit& a, const ScanHit& b) {
-                  if (a.count != b.count) return a.count > b.count;
-                  return a.minDist < b.minDist;
-              });
-    return hits;
-}
-
-// ---------------------------------------------------------------------------
-// name picking: strict filters, then score = occurrences, closeness, style
-// ---------------------------------------------------------------------------
-static bool isAlphaChar(char c) {
-    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
-}
-
-static bool looksLikeServerName(const std::string& s, const std::string& anchor) {
-    if (s.size() < 3 || s.size() > 48) return false;
-    int alpha = 0, digit = 0;
-    for (char c : s) {
-        if (isAlphaChar(c))
-            ++alpha;
-        else if (c >= '0' && c <= '9')
-            ++digit;
-        else if (c != ' ' && c != '\'' && c != '-' && c != '&' && c != '!' &&
-                 c != ':')
-            return false;  // hosts/URLs/paths/tech junk
-    }
-    if (alpha < 2 || digit > alpha) return false;  // no all-numeric strings
-    // never echo the anchor itself or its domain
-    const std::string lower = lowerAscii(s);
-    if (lower == lowerAscii(anchor)) return false;
-    if (anchor.find(lower) != std::string::npos) return false;
-    if (lower.find("cubecraft.net") != std::string::npos) return false;
-    static const char* kBad[] = {
-        "minecraft", "server", "realm", "realms", "play", "join", "invite",
-        "friends", "friend", "settings", "menu", "options", "exit", "back",
-        "cancel", "accept", "world", "worlds", "marketplace", "news",
-        "achievements", "wardrobe", "skins", "store", "profile", "online",
-        "offline", "loading", "connecting", "featured", "servers", "custom",
-        "add", "search", "refresh", "public", "private", "more", "pause",
-        "game", "language", "accessibility", "control", "video", "audio",
-        "account", "sign in", "sign out", "host", "port", "address", "name",
-        "players", "player", "loading", "connecting to", "xbox", "live",
-        "the nether", "overworld", "theend", "the end"};
-    const std::string lowerTrim = lowerAscii(trim(s));
-    for (const char* b : kBad)
-        if (lowerTrim == b) return false;
-    return true;
-}
-
-static std::string pickBestName(const std::string& anchor,
-                                const std::vector<ScanHit>& hits,
-                                std::string* debugOut) {
-    std::string best;
-    int bestScore = 0;
-    std::vector<std::pair<int, std::string>> cands;  // (score, text)
-    for (const auto& h : hits) {
-        if (!looksLikeServerName(h.text, anchor)) continue;
-        int score = h.count * 30 - h.minDist / 1024;
-        const std::string t = trim(h.text);
-        if (isAlphaChar(t[0]) && t[0] >= 'A' && t[0] <= 'Z') score += 4;  // Title Case
-        if (t.size() >= 4 && t.size() <= 24) score += 2;
-        cands.emplace_back(score, t);
-        if (score > bestScore) {
-            bestScore = score;
-            best = t;
-        }
-    }
-    std::sort(cands.begin(), cands.end(),
-              [](const std::pair<int, std::string>& a,
-                 const std::pair<int, std::string>& b) { return a.first > b.first; });
-    if (debugOut) {
-        debugOut->clear();
-        for (size_t i = 0; i < cands.size() && i < 5; ++i) {
-            if (i) *debugOut += ", ";
-            *debugOut += std::to_string(cands[i].first) + ":" + cands[i].second;
-        }
-    }
-    return best;
-}
 
 // Reads the signed-in player's XUID from the launcher's catalog_info.json
 // ("<xuid>" : {...}); used as a memory anchor to find the IGN.
@@ -1174,14 +893,14 @@ static std::string readPlayerXuid() {
 // Cached, gated entry points. The server scan only runs while a server/realm
 // session is live (blob cache open); the IGN scan runs lazily and is cached.
 static std::string memScan(const std::string& anchor, ScanResult& cache,
-                           const char* what) {
+                           const char* what, int minLen = 4) {
     const long long now = nowMs();
     if (!anchor.empty() && anchor == cache.anchor &&
         now - cache.atMs < kMemScanEveryMs)
         return cache.name;
     std::vector<ScanHit> hits = collectScanHits(anchor);
     std::string debug;
-    std::string name = pickBestName(anchor, hits, &debug);
+    std::string name = pickBestName(anchor, hits, &debug, minLen);
     cache = ScanResult{anchor, name, debug, now};
     gRawHits = std::move(hits);
     gRawAnchor = anchor;
@@ -1197,7 +916,7 @@ static std::string memScanServerName(const std::string& anchor) {
 }
 
 static std::string memScanIgn() {
-    return memScan(readPlayerXuid(), gIgnScan, "ign");
+    return memScan(readPlayerXuid(), gIgnScan, "ign", 3);
 }
 
 // IGN refresher: retry quickly until a name exists, then only refresh every
@@ -1229,19 +948,17 @@ int probeServerDimension() {
     gServerDimAt = now;
     gServerDim = -1;
     static const char* markers[3] = {"Overworld", "Nether", "TheEnd"};
-    // ensure the anchor scan has fresh raw hits without re-scanning the heap
-    if (gRawAnchor != gServerScan.anchor || now - gRawAt > kMemScanEveryMs)
-        memScanServerName(gServerScan.anchor);
-    int counts[3] = {0, 0, 0};
+    // memmem-only whole-heap counter (safe on the game thread, time-boxed) -
+    // the markers are UI/render strings scattered across the heap, not
+    // necessarily near the hostname anchor, so count them directly.
+    const std::vector<std::string> needles = {markers[0], markers[1], markers[2]};
+    std::vector<int> counts;
+    countOccurrencesMany(needles, counts);
     int best = -1, bestN = 0;
-    for (const auto& h : gRawHits) {
-        for (int i = 0; i < 3; ++i) {
-            if (h.text != markers[i]) continue;
-            counts[i] += h.count;
-            if (counts[i] > bestN) {
-                bestN = counts[i];
-                best = i;
-            }
+    for (int i = 0; i < 3; ++i) {
+        if (counts[i] > bestN) {
+            bestN = counts[i];
+            best = i;
         }
     }
     if (bestN >= 1) gServerDim = best;
@@ -1493,9 +1210,13 @@ void detectCurrentServer(const std::vector<CatalogEntry>& catalog,
         out.kind =
             anchorHost.find("pocket.realms") != std::string::npos ? "realm" : "server";
     } else if (!out.name.empty() && !scanName.empty() && out.kind == "server") {
-        // the actual connected sub-server (e.g. "SoulSteel") beats the
-        // network-level catalog name (e.g. "CubeCraft")
-        out.name = scanName;
+        // The actual connected sub-server (e.g. "SoulSteel") may beat the
+        // network-level catalog name (e.g. "CubeCraft") — but only when the
+        // scan result is long enough to be a real name and at least as
+        // specific as the catalog label. A 2-3 char misaligned fragment must
+        // never override a verified catalog match.
+        if (scanName.size() >= 4 && scanName.size() >= out.name.size())
+            out.name = scanName;
     }
     if (out.name.empty() && !realmPick.host.empty()) {
         out.kind = "realm";
@@ -1576,7 +1297,10 @@ std::string debugServerScan() {
 
 std::string debugIgn() {
     std::string name = ignForPresence();
-    return name.empty() ? std::string("(none)") : name;
+    std::string out = name.empty() ? std::string("(none)") : name;
+    if (!gIgnScan.debug.empty())
+        out += " cands=" + gIgnScan.debug;
+    return out;
 }
 
 std::string debugServerDim() {
