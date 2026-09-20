@@ -46,8 +46,12 @@ void TextInputHandler::disable() {
 
 void TextInputHandler::onTextInput(std::string const& text) {
     if(!enabled) {
-        textUpdateCallback(text);
-        return;
+        // The game did not open the IME (no setSoftKeyboardActive call), but the
+        // GameActivity input poller still syncs our tracked text into the game's
+        // input state. Keep tracking the input instead of dropping it, so fields
+        // the game opens without an IME (e.g. the in-game "Add Server" dialog)
+        // accept typing and pasting too. Leftover text is cleared by update()/
+        // disable() whenever the game opens or closes a real editable field.
     }
     if(text.size() == 1 && text[0] == 8) {  // backspace
         if(currentTextPositionUTF <= 0)
