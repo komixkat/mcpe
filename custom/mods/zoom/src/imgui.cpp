@@ -33,8 +33,19 @@ void initImgui() {
         };
         animated.length = 0;
 
+        struct MenuEntryABI disableDampening;
+        disableDampening.name = "Disable sensitivity dampening";
+        disableDampening.click = [](void* user) {
+            Conf::disableSensitivityDampening = !Conf::disableSensitivityDampening;
+            Conf::save();
+        };
+        disableDampening.selected = [](void* user) {
+            return Conf::disableSensitivityDampening;
+        };
+        disableDampening.length = 0;
+
         struct MenuEntryABI entry;
-        struct MenuEntryABI entries[] = {changeZoomKey, animated};
+        struct MenuEntryABI entries[] = {changeZoomKey, animated, disableDampening};
         entry.subentries = entries;
         entry.length = sizeof(entries) / sizeof(struct MenuEntryABI);
         entry.name = "Zoom";

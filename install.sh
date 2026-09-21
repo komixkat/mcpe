@@ -58,8 +58,14 @@ trap 'rm -rf "$TMP"' EXIT
 cd "$TMP"
 
 echo "Downloading release assets from $TAG ..."
+# Download each asset with progress bar
+i=0
+total=$(printf '%s' "$URLS" | wc -w)
 for url in $URLS; do
-  curl -fsSLO "$url"
+  i=$((i + 1))
+  filename=$(basename "$url")
+  echo "  [$i/$total] Downloading $filename ..."
+  curl -fL --progress-bar -o "$filename" "$url"
 done
 
 if [ -f SHA256SUMS.txt ]; then
@@ -115,9 +121,12 @@ write_mod_meta() { # name version arch json
 # ---------------------------------------------------------------------------
 echo "Deploying the runtime updates mod ..."
 install -d "$MODDIR/patches/v1.26.0.2/x86_64"
-curl -fsSL -o "$MODDIR/libmcpelauncher-updates.so" "$RAW/mods/libmcpelauncher-updates.so"
-curl -fsSL -o "$MODDIR/patches/libPlayFabMultiplayer.so" "$RAW/mods/patches/libPlayFabMultiplayer.so"
-curl -fsSL -o "$MODDIR/patches/v1.26.0.2/x86_64/libmaesdk.so" "$RAW/mods/patches/v1.26.0.2/x86_64/libmaesdk.so"
+echo "  Downloading libmcpelauncher-updates.so ..."
+curl -fL --progress-bar -o "$MODDIR/libmcpelauncher-updates.so" "$RAW/mods/libmcpelauncher-updates.so"
+echo "  Downloading libPlayFabMultiplayer.so ..."
+curl -fL --progress-bar -o "$MODDIR/patches/libPlayFabMultiplayer.so" "$RAW/mods/patches/libPlayFabMultiplayer.so"
+echo "  Downloading libmaesdk.so ..."
+curl -fL --progress-bar -o "$MODDIR/patches/v1.26.0.2/x86_64/libmaesdk.so" "$RAW/mods/patches/v1.26.0.2/x86_64/libmaesdk.so"
 chmod +x "$MODDIR/libmcpelauncher-updates.so"
 
 if [ ! -s "$MODDIR/libmcpelauncher-updates.so" ] \
@@ -145,6 +154,7 @@ if [ -f "$BUNDLE" ]; then
       backed_up=1
     fi
   done < <(tar -tzf "$BUNDLE")
+  echo "  Extracting mod bundle ..."
   tar -xzf "$BUNDLE" -C "$MODDIR"
   [ "$backed_up" = 1 ] && echo "  (previous mods backed up to $BACKUP)"
   echo "  OK: mods -> $MODDIR"
@@ -164,6 +174,7 @@ fi
 if [ -f mcpelauncher-skinpack.tar.gz ]; then
   echo "Installing custom skin pack ..."
   install -d "$SKINROOT"
+  echo "  Extracting skin pack ..."
   tar -xzf mcpelauncher-skinpack.tar.gz -C "$SKINROOT"
   echo "  OK: skin pack -> $SKINROOT"
 fi
@@ -188,6 +199,7 @@ fi
 # needs to be re-asserted after a game-version update (re-run install.sh).
 # ---------------------------------------------------------------------------
 if [ -f "$SKINROOT/Nekomix/nekomix.png" ]; then
+  echo "Applying default skin override ..."
   VANILLA_STEVE="$(find "$DATA_DIR/versions" -type f \
     -path '*/skin_packs/vanilla/steve.png' 2>/dev/null | sort | tail -1)"
   if [ -n "$VANILLA_STEVE" ]; then
@@ -262,6 +274,7 @@ fi
 # every launch. They must be valid JSON arrays; only create when absent so a
 # user's real pack selection is never overwritten.
 # ---------------------------------------------------------------------------
+echo "Ensuring pack-state files exist ..."
 PACKDIR="$DATA_DIR/games/com.mojang"
 for PKG in global_resource_packs.json resource_packs.json known_resource_packs.json; do
   if [ ! -f "$PACKDIR/$PKG" ]; then

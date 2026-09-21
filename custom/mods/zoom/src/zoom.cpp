@@ -34,9 +34,18 @@ static inline float packedFovToFloat(unsigned long v) {
 // scaled up by Conf::sensitivityMultiplier and floored at
 // Conf::sensitivityFloor to keep deep zoom usable. Both are tunable in
 // zoom.conf; set multiplier to 1.0 and floor to 0.0 for the exact ratio.
+//
+// Set disableSensitivityDampening=true in zoom.conf to skip dampening entirely
+// (raw mouse input when zoomed). Can help with "rigid" camera movement at
+// extreme zoom levels where the game's pitch clamping makes movement feel
+// locked to cardinal directions.
 static void applyZoomSensitivity(unsigned long current, unsigned long normal) {
     if(!game_window_set_mouse_relative_scale)
         return;
+    if(Conf::disableSensitivityDampening) {
+        game_window_set_mouse_relative_scale(game_window_get_primary_window(), 1.0f);
+        return;
+    }
     float scale = 1.0f;
     float fz = packedFovToFloat(current);
     float fn = packedFovToFloat(normal);

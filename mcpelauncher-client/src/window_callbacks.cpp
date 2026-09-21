@@ -416,16 +416,17 @@ static bool deadKey(KeyCode key) {
 }
 
 void WindowCallbacks::onKeyboard(KeyCode key, KeyAction action, int mods) {
-    if(hasInputMode(InputMode::Mouse)) {
-        if(keyboardCallbacksLock.try_lock()) {
-            for(size_t i = 0; i < keyboardCallbacks.size(); i++) {
-                if(keyboardCallbacks[i].callback(keyboardCallbacks[i].user, (int)key, (int)action)) {
-                    keyboardCallbacksLock.unlock();
-                    return;
-                }
+    // Always invoke keyboard callbacks for mod keys (snaplook, zoom, shulkerpreview)
+    // regardless of input mode, so they work when holding other keys (shift+WASD, etc.)
+    if(keyboardCallbacksLock.try_lock()) {
+        for(size_t i = 0; i < keyboardCallbacks.size(); i++) {
+            if(keyboardCallbacks[i].callback(keyboardCallbacks[i].user, (int)key, (int)action)) {
+                keyboardCallbacksLock.unlock();
+                return;
             }
-            keyboardCallbacksLock.unlock();
         }
+        keyboardCallbacksLock.unlock();
+    }
 #ifdef USE_IMGUI
         // Update shared input state for ImGui
         if((int)key < 512) {
@@ -453,6 +454,11 @@ void WindowCallbacks::onKeyboard(KeyCode key, KeyAction action, int mods) {
 
         if(key == KeyCode::FN11 && action == KeyAction::PRESS)
             setFullscreen(!Settings::fullscreen);
+
+        // Force-quit hotkey: Ctrl+Shift+Q to kill the game if stuck on disconnect screen
+        if(modCTRL && (mods & KEY_MOD_SHIFT) && action == KeyAction::PRESS && key == KeyCode::Q) {
+            onClose();
+        }
 
         if(useDirectKeyboardInput && (action == KeyAction::PRESS || action == KeyAction::RELEASE)) {
             if(Keyboard::useLegacyKeyboard) {
@@ -515,7 +521,6 @@ void WindowCallbacks::onKeyboard(KeyCode key, KeyAction action, int mods) {
                 inputQueue.addEvent(FakeKeyEvent(AKEY_EVENT_ACTION_UP, mapMinecraftToAndroidKey(key), state));
         }
     }
-}
 void WindowCallbacks::onKeyboardText(std::string const& c) {
 #ifdef USE_IMGUI
     // Add text input to shared state

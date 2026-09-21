@@ -10,6 +10,9 @@ struct Conf {
     // zoom stays usable. Both are tunable in zoom.conf.
     static float sensitivityMultiplier;
     static float sensitivityFloor;
+    // If true, skip sensitivity dampening entirely (raw mouse input when zoomed).
+    // Can help with "rigid" camera movement at extreme zoom levels.
+    static bool disableSensitivityDampening;
 
     static bool changingKey;
 
