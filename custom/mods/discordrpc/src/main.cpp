@@ -3,8 +3,6 @@
 
 #include "presence.h"
 
-extern "C" [[gnu::visibility("default")]] void showDiscordRPCConfig();
-
 namespace {
 
 void worker() { runPresence(); }
@@ -27,6 +25,4 @@ extern "C" __attribute__((visibility("default"))) void mod_init() {
     } catch (...) {
         std::fprintf(stderr, "[DiscordRPC] could not start worker thread\n");
     }
-    // Register in-game config menu
-    showDiscordRPCConfig();
 }

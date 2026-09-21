@@ -14,9 +14,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 add_library(mcpelauncherdiscordrpc SHARED
         src/main.cpp
         src/presence.cpp
-        src/discord_ipc.cpp
-        src/imgui.cpp
-        src/imgui.h)
+        src/discord_ipc.cpp)
 
 target_include_directories(mcpelauncherdiscordrpc PRIVATE src)
 

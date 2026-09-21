@@ -12,6 +12,8 @@
 #include <properties/property.h>
 #include <properties/property_list.h>
 
+namespace {
+
 constexpr const char* kConfPath = "/data/data/com.mojang.minecraftpe/discordrpc.conf";
 
 // The whole presence. Discord RPC buttons are plain links.
@@ -79,6 +81,8 @@ void loadConfig() {
     } catch (...) {
     }
 }
+
+}  // namespace
 
 bool presenceInit() {
     try {
