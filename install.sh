@@ -153,7 +153,7 @@ if [ -f "$BUNDLE" ]; then
   write_mod_meta "snaplook" "$TAG" "$ABI" '{"metadata":{"name":"Snaplook","description":"Hold a key to snap into an over-the-shoulder view behind your character.","url":"https://github.com/komixkat/mcpe","image":""}}'
   write_mod_meta "zoom" "$TAG" "$ABI" '{"metadata":{"name":"Zoom","description":"Zoom in while playing (hold a key; sensitivity adjustable in the mod config).","url":"https://github.com/komixkat/mcpe","image":""}}'
   write_mod_meta "shulkerpreview" "$TAG" "$ABI" '{"metadata":{"name":"Shulker Preview","description":"Preview the contents of shulker boxes without opening them.","url":"https://github.com/komixkat/mcpe","image":""}}'
-  write_mod_meta "discordrpc" "$TAG" "$ABI" '{"metadata":{"name":"Discord Rich Presence","description":"Shows \"Playing Minecraft\" on your Discord profile with a \"Join komixkat\" button that opens the Minecraft profile page. Activate by adding your Discord app Client ID to discordrpc.conf.","url":"https://github.com/komixkat/mcpe/blob/qt6/custom/mods/discordrpc/README.md","image":""}}'
+  write_mod_meta "discordrpc" "$TAG" "$ABI" '{"metadata":{"name":"Discord Rich Presence","description":"Shows \"Playing Minecraft\" on your Discord profile with an elapsed timer and up to two configurable link buttons (Join, YouTube, Twitch, etc.). Set client_id in discordrpc.conf to enable. Auto-reconnects if Discord starts after the game.","url":"https://github.com/komixkat/mcpe/blob/qt6/custom/mods/discordrpc/README.md","image":""}}'
 else
   echo "WARNING: $TAG has no $BUNDLE; skipping fixed mods." >&2
 fi
@@ -211,13 +211,15 @@ fi
 if [ ! -f "$DATA_DIR/discordrpc.conf" ]; then
   cat > "$DATA_DIR/discordrpc.conf" <<'EOF'
 # Discord Rich Presence for the launcher/game (custom/mods/discordrpc).
-# The presence is always "Playing Minecraft" (with an elapsed timer) plus a
-# "Join komixkat" button that opens the Minecraft profile page.
+# The presence is always "Playing Minecraft" (with an elapsed timer) plus
+# up to two configurable buttons.
 # Config is re-read every ~15 seconds, so edits apply without restarting.
 #
 # 1. Create a Discord application: https://discord.com/developers/applications
 # 2. Copy its Client ID into client_id below.
 # 3. Restart the game with Discord running.
+#    The mod auto-reconnects if Discord starts after the game or if the
+#    connection drops (quiet retry with exponential backoff).
 client_id=
 
 # Optional artwork: upload images in the Developer Portal (Rich Presence ->
@@ -227,6 +229,28 @@ large_text=
 
 # Quiet the "[DiscordRPC]" connection lines on the launcher console.
 log=true
+
+# Button 1 (primary join button) — override the default "Join komixkat":
+# button1_label=Your Button Name
+# button1_url=https://your-link.com
+
+# Button 2 (optional multipurpose button) — disabled by default:
+# button2_enabled=true
+# button2_label=YouTube
+# button2_url=https://youtube.com/@yourchannel
+#
+# Examples:
+#   button2_enabled=true
+#   button2_label=Twitch
+#   button2_url=https://twitch.tv/yourname
+#
+#   button2_enabled=true
+#   button2_label=Website
+#   button2_url=https://yourname.com
+#
+#   button2_enabled=true
+#   button2_label=Discord
+#   button2_url=https://discord.gg/yourinvite
 EOF
   echo "  OK: created discordrpc.conf (set client_id to enable presence)"
 fi

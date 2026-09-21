@@ -16,11 +16,14 @@ namespace {
 
 constexpr const char* kConfPath = "/data/data/com.mojang.minecraftpe/discordrpc.conf";
 
-// The whole presence. Discord RPC buttons are plain links, so the profile
-// "Join" button opens the Minecraft profile page with one click.
+// The whole presence. Discord RPC buttons are plain links.
 constexpr const char* kDetails = "Playing Minecraft";
-constexpr const char* kButtonLabel = "Join komixkat";
-constexpr const char* kButtonUrl = "https://launch.minecraft.net/profile/komixkat";
+
+// Default join button - users can override in discordrpc.conf:
+//   button1_label=Your Button Name
+//   button1_url=https://your-link.com
+constexpr const char* kDefaultButton1Label = "Join komixkat";
+constexpr const char* kDefaultButton1Url = "https://launch.minecraft.net/profile/komixkat";
 
 properties::property_list kConf('=');
 properties::property<std::string> kClientId(kConf, "client_id", "");
@@ -28,9 +31,24 @@ properties::property<bool> kLogEnabled(kConf, "log", true);
 properties::property<std::string> kLargeImage(kConf, "large_image", "");
 properties::property<std::string> kLargeText(kConf, "large_text", "");
 
+// Button 1 (primary join button)
+properties::property<std::string> kButton1Label(kConf, "button1_label", kDefaultButton1Label);
+properties::property<std::string> kButton1Url(kConf, "button1_url", kDefaultButton1Url);
+
+// Button 2 (optional multipurpose button - toggle with button2_enabled=true)
+//   button2_enabled=false
+//   button2_label=YouTube
+//   button2_url=https://youtube.com/@yourchannel
+properties::property<bool> kButton2Enabled(kConf, "button2_enabled", false);
+properties::property<std::string> kButton2Label(kConf, "button2_label", "");
+properties::property<std::string> kButton2Url(kConf, "button2_url", "");
+
 std::string gClientId;
 bool gLog = true;
 std::string gLargeImage, gLargeText;
+std::string gButton1Label, gButton1Url;
+bool gButton2Enabled = false;
+std::string gButton2Label, gButton2Url;
 
 std::string trim(const std::string& s) {
     size_t b = 0, e = s.size();
@@ -55,6 +73,11 @@ void loadConfig() {
         gLog = kLogEnabled.get();
         gLargeImage = trim(std::string(kLargeImage.get()));
         gLargeText = trim(std::string(kLargeText.get()));
+        gButton1Label = trim(std::string(kButton1Label.get()));
+        gButton1Url = trim(std::string(kButton1Url.get()));
+        gButton2Enabled = kButton2Enabled.get();
+        gButton2Label = trim(std::string(kButton2Label.get()));
+        gButton2Url = trim(std::string(kButton2Url.get()));
     } catch (...) {
     }
 }
@@ -105,13 +128,20 @@ void runPresence() {
         a.startMs = startMs;
         a.largeImage = gLargeImage;
         a.largeText = gLargeText;
-        a.buttons = {{kButtonLabel, kButtonUrl}};
+
+        // Build buttons array from config (Discord supports max 2 buttons)
+        if (!gButton1Label.empty() && !gButton1Url.empty()) {
+            a.buttons.push_back({gButton1Label, gButton1Url});
+        }
+        if (gButton2Enabled && !gButton2Label.empty() && !gButton2Url.empty()) {
+            a.buttons.push_back({gButton2Label, gButton2Url});
+        }
 
         if (!ipc.setActivity(a)) {
             ipc.disconnect();
             continue;
         }
-        // Config edits (image keys, log toggle) apply without restarting.
+        // Config edits (image keys, log toggle, buttons) apply without restarting.
         loadConfig();
         if (!ipc.pump(15000)) ipc.disconnect();
     }

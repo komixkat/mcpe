@@ -1,19 +1,20 @@
 # Discord Rich Presence (mcpelauncherdiscordrpc)
 
 A no-frills Discord presence for the launcher: while you play, your profile
-shows **`Playing Minecraft`** with an elapsed timer, plus a single **Join
-komixkat** button that opens your Minecraft profile page:
+shows **`Playing Minecraft`** with an elapsed timer, plus up to two custom
+buttons:
 
 ```
 Playing Minecraft        ← details (line 2)
 00:12:34 elapsed         ← timestamps
-[Join komixkat]          ← button → https://launch.minecraft.net/profile/komixkat
+[Join komixkat]          ← button 1 (configurable)
+[YouTube]                ← button 2 (optional, toggleable)
 ```
 
 Nothing else is detected or scanned: no server/realm names, no dimensions, no
-in-game name. The presence is always the same (that is the point). The button
-is a Discord link button, so it has no special permissions: it just opens the
-profile URL.
+in-game name. The presence is always the same (that is the point). The buttons
+are Discord link buttons, so they have no special permissions: they just open
+the URLs you configure.
 
 ## Enable (one-time, ~2 minutes)
 
@@ -31,6 +32,8 @@ app's registration:
 
 4. Restart the game. Discord desktop must be **running and logged in** (the
    mod talks to Discord through its `/tmp/discord-ipc-N` socket).
+   The mod will **auto-reconnect** if Discord starts after the game, or if
+   the connection drops for any reason.
 
 ## Your logo (optional)
 
@@ -45,6 +48,72 @@ large_text=Minecraft
 
 The config is re-read every ~15 seconds, so artwork key edits apply without
 restarting the game.
+
+## Buttons (fully configurable)
+
+All buttons are configured in `~/.local/share/mcpelauncher/discordrpc.conf`.
+Changes apply live without restarting.
+
+### Button 1 (primary join button)
+
+Defaults to "Join komixkat" → your Minecraft profile. Override with:
+
+```
+button1_label=Your Button Name
+button1_url=https://your-link.com
+```
+
+**Example - custom join button:**
+```
+button1_label=Join My Server
+button1_url=https://discord.gg/myserver
+```
+
+### Button 2 (optional multipurpose button)
+
+Disabled by default. Enable and configure with:
+
+```
+button2_enabled=true
+button2_label=YouTube
+button2_url=https://youtube.com/@yourchannel
+```
+
+**Examples:**
+```
+# Twitch link
+button2_enabled=true
+button2_label=Twitch
+button2_url=https://twitch.tv/yourname
+
+# Personal website
+button2_enabled=true
+button2_label=Website
+button2_url=https://yourname.com
+
+# Discord server invite
+button2_enabled=true
+button2_label=Discord
+button2_url=https://discord.gg/yourinvite
+```
+
+## Full config example
+
+```
+client_id=1550483074905546782
+log=true
+large_image=mcpe-logo
+large_text=Minecraft Bedrock
+
+# Primary button (default: "Join komixkat" → Minecraft profile)
+button1_label=Join My World
+button1_url=https://discord.gg/myworld
+
+# Optional second button (disabled by default)
+button2_enabled=true
+button2_label=YouTube
+button2_url=https://youtube.com/@mychannel
+```
 
 ## Verify
 
@@ -64,6 +133,9 @@ connection chatter.
 - **Fail-closed.** Discord absent → quiet retry with backoff, no logging spam.
   Bad config (no numeric `client_id`) → one stderr line and the mod stays
   disabled.
+- **Auto-reconnect.** If Discord starts after the game, or the connection
+  drops, the mod quietly reconnects with exponential backoff (2s → 4s → 8s
+  → max 30s).
 
 ## Build
 
